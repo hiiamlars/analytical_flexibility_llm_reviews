@@ -1,0 +1,883 @@
+---
+title: "analyses"
+author: "Lars Schilling"
+editor: visual
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    highlight-style: haddock
+    theme: flatly
+    toc: true
+    toc-location: left
+    embed-source: true
+execute:
+  warning: false
+  message: false
+---
+
+# Dependencies
+
+```{r}
+working_dir <- "G:/Meine Ablage/Thesis/tvd_mi/"
+```
+
+```{r}
+library(arrow)
+library(tidyverse)
+library(knitr)
+library(forcats)
+```
+
+# Define functions
+
+The plot functions for a specification curve are taken from Cummins (2025):
+
+```{r}
+specification_curve_plot <- function(data,
+                                     outcome = "outcome",
+                                     outcome_name = "Outcome",
+                                     plot_title = NULL,
+                                     interval_lower = NULL,
+                                     interval_upper = NULL,
+                                     rank_by = "rank",
+                                     rank_by_outcome = FALSE,
+                                     relative_height_of_upper_plot = 0.70,
+                                     outcome_cutoff = NULL,
+                                     facet_by = NULL,
+                                     facet_ncol = 2,
+                                     mutate_plots = NULL) {
+  # deps
+  require(dplyr)
+  require(tidyr)
+  require(ggplot2)
+  require(cowplot)
+  require(ggtext)
+  require(rlang)
+  require(grid)
+  
+  # rename outcome/rank
+  data <- data |>
+    rename(outcome = {{outcome}}, rank = {{rank_by}})
+  
+  # intervals
+  if (!is.null(interval_lower))
+    data <- data |> rename(interval_lower = {{interval_lower}})
+  else
+    data$interval_lower <- data$outcome
+  if (!is.null(interval_upper))
+    data <- data |> rename(interval_upper = {{interval_upper}})
+  else
+    data$interval_upper <- data$outcome
+  
+  # optional re-ranking
+  if (rank_by_outcome) {
+    data <- data |> arrange(outcome) |> mutate(rank = dplyr::row_number())
+  }
+  
+  # factorize non-numeric spec columns
+  data <- data |>
+    mutate(across(
+      .cols = -c(rank, outcome, interval_lower, interval_upper),
+      .fns = as.factor
+    ))
+  
+  exclude_cols_base <- c("rank", "outcome", "interval_lower", "interval_upper")
+  
+  facet_name <- NULL
+  if (!is.null(facet_by)) {
+    facet_sym  <- rlang::ensym(facet_by)
+    facet_name <- rlang::as_name(facet_sym)
+    if (!facet_name %in% names(data))
+      stop("facet_by column not found in data.")
+  }
+  
+  # build one full multiverse plot; toggle y-titles & left strips
+  build_one <- function(df,
+                        title_text = plot_title,
+                        show_y_titles = TRUE) {
+    p_estimates <- df |>
+      mutate(outcome_name = outcome_name) |>
+      ggplot(aes(rank, outcome)) +
+      geom_linerange(aes(ymin = interval_lower, ymax = interval_upper)) +
+      geom_point(shape = "circle", size = 2) +
+      facet_grid(
+        outcome_name ~ .,
+        space = "free_y",
+        scales = "free_y",
+        switch = "y"
+      ) +
+      scale_y_continuous(breaks = scales::pretty_breaks()) +
+      scale_x_continuous(NULL, expand = c(.02, .02)) +
+      ylab(if (show_y_titles)
+        "Simulation results"
+        else
+          NULL) +
+      theme_minimal() +
+      theme(
+        legend.position = "none",
+        axis.line.x = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_rect(fill = NA, colour = NA),
+        panel.spacing.x = unit(0.15, "cm"),
+        strip.text.y.left = if (show_y_titles)
+          ggtext::element_markdown(
+            angle = 90,
+            face = "bold",
+            size = 7
+          )
+        else
+          element_blank(),
+        axis.text.y   = element_text(
+          angle = 0,
+          hjust = 0.5,
+          size = 6
+        ),
+        axis.title.y  = if (show_y_titles)
+          element_text(
+            size = 9,
+            face = "bold",
+            margin = margin(r = 4)
+          )
+        else
+          element_blank(),
+        panel.spacing = unit(0.25, "lines"),
+        axis.title.x  = element_blank(),
+        axis.text.x   = element_blank(),
+        axis.ticks.x  = element_blank()
+      )
+    
+    if (!is.null(outcome_cutoff)) {
+      p_estimates <- p_estimates + geom_hline(yintercept = outcome_cutoff, linetype = "dotted")
+    }
+    
+    exclude_cols <- exclude_cols_base
+    if (!is.null(facet_name))
+      exclude_cols <- c(exclude_cols, facet_name)
+    
+    p_specs <- df |>
+      tidyr::pivot_longer(cols = -dplyr::all_of(exclude_cols)) |>
+      arrange(rank) |>
+      ggplot(aes(
+        x = rank,
+        y = factor(value),
+        color = name
+      )) +
+      geom_point(size = 3.5, shape = "|") +  
+      facet_grid(name ~ .,
+                 space = "free_y",
+                 scales = "free_y",
+                 switch = "y") +
+      guides(color = "none") +
+      scale_x_continuous(NULL, expand = c(.02, .02)) +
+      ylab(if (show_y_titles)
+        "Simulation conditions"
+        else
+          NULL) +
+      theme_minimal() +
+      theme(
+        strip.placement  = "outside",
+        strip.background = element_rect(fill = NA, colour = NA),
+        panel.spacing.x  = unit(0.15, "cm"),
+        strip.text.y.left = if (show_y_titles)
+          ggtext::element_markdown(
+            angle = 90,
+            face = "bold",
+            size = 7
+          )
+        else
+          element_blank(),
+        axis.text.y   = element_text(
+          angle = 0,
+          hjust = 1,
+          size = 6
+        ),
+        axis.title.y  = if (show_y_titles)
+          element_text(
+            size = 9,
+            face = "bold",
+            margin = margin(r = 4)
+          )
+        else
+          element_blank(),
+        panel.spacing = unit(0.25, "lines"),
+        axis.title.x  = element_blank(),
+        axis.text.x   = element_blank(),
+        axis.ticks.x  = element_blank()
+      ) +
+      scale_color_brewer(palette = "Dark2")
+    
+    # NB: enable mutate of plots before finalisation 
+    if (is.function(mutate_plots)) {
+      out <- mutate_plots(p_estimates, p_specs)
+      if (inherits(out, "gg")) {
+        p_estimates <- out
+      } else if (is.list(out)) {
+        if (length(out) >= 1) p_estimates <- out[[1]]
+        if (length(out) >= 2) p_specs     <- out[[2]]
+      }
+    }
+    
+    # align all plot text asset left widths exactly 
+    g_est <- ggplotGrob(p_estimates)
+    g_spc <- ggplotGrob(p_specs)
+    max_w <- unit.pmax(g_est$widths, g_spc$widths)
+    g_est$widths <- max_w
+    g_spc$widths <- max_w
+    
+    combo <- cowplot::plot_grid(
+      g_est,
+      g_spc,
+      axis = "bltr",
+      align = "v",
+      ncol = 1,
+      rel_heights = c(relative_height_of_upper_plot, 1)
+    )
+    if (!is.null(title_text)) {
+      title_grob <- cowplot::ggdraw() +
+        cowplot::draw_label(
+          title_text,
+          x = 0.5,
+          hjust = 0.5,
+          y = 0.5, # adjusted
+          vjust = 0.5, #adjusted
+          fontface = "bold"
+        )
+      combo <- cowplot::plot_grid(title_grob,
+                                  combo,
+                                  ncol = 1,
+                                  rel_heights = c(0.12, 1)) # Adjusted
+    }
+    combo
+  }
+  
+  # if no faceting, show labels
+  if (is.null(facet_by)) {
+    return(build_one(data, plot_title, show_y_titles = TRUE))
+  }
+  
+  # faceted: only leftmost plots in each row show y text
+  facet_vals <- if (is.factor(data[[facet_name]]))
+    levels(droplevels(data[[facet_name]]))
+  else
+    unique(data[[facet_name]])
+  
+  plotlist <- lapply(seq_along(facet_vals), function(i) {
+    v  <- facet_vals[i]
+    df <- dplyr::filter(data, .data[[facet_name]] == v)
+    if (nrow(df) == 0)
+      return(NULL)
+    local_title <- if (!is.null(plot_title))
+      paste0(plot_title, ": ", v)
+    else
+      paste0(facet_name, ": ", v)
+    is_left_col <- ((i - 1) %% facet_ncol) == 0
+    build_one(df, local_title, show_y_titles = is_left_col)
+  })
+  plotlist <- Filter(Negate(is.null), plotlist)
+  
+  cowplot::plot_grid(plotlist = plotlist,
+                     ncol = facet_ncol,
+                     align = "hv")
+}
+```
+
+```{r}
+specification_curve_plot_with_shading <- function(data,
+                                                  outcome = "outcome",
+                                                  outcome_name = "Outcome",
+                                                  plot_title = NULL,
+                                                  interval_lower = NULL,
+                                                  interval_upper = NULL,
+                                                  rank_by = "rank",
+                                                  rank_by_outcome = FALSE,
+                                                  relative_height_of_upper_plot = 0.70,
+                                                  outcome_cutoff = NULL,
+                                                  facet_by = NULL,
+                                                  facet_ncol = 2,
+                                                  shade_lower = NULL,
+                                                  shade_upper = NULL,
+                                                  shade_fill_by = NULL,
+                                                  shade_values = NULL,
+                                                  shade_alpha = 0.5,
+                                                  shade_fill_constant = "red",
+                                                  mutate_plots = NULL) {
+  require(dplyr)
+  require(tidyr)
+  require(ggplot2)
+  require(cowplot)
+  require(ggtext)
+  require(rlang)
+  require(grid)
+  
+  data <- data |>
+    rename(outcome = {{outcome}}, rank = {{rank_by}})
+  
+  if (!is.null(interval_lower))
+    data <- data |> rename(interval_lower = {{interval_lower}})
+  else
+    data$interval_lower <- data$outcome
+  if (!is.null(interval_upper))
+    data <- data |> rename(interval_upper = {{interval_upper}})
+  else
+    data$interval_upper <- data$outcome
+  
+  if (rank_by_outcome)
+    data <- data |> arrange(outcome) |> mutate(rank = dplyr::row_number())
+  
+  keep_num <- c("rank", "outcome", "interval_lower", "interval_upper")
+  if (!is.null(shade_lower))
+    keep_num <- c(keep_num, as_name(ensym(shade_lower)))
+  if (!is.null(shade_upper))
+    keep_num <- c(keep_num, as_name(ensym(shade_upper)))
+  
+  data <- data |> mutate(across(.cols = -all_of(keep_num), .fns = as.factor))
+  exclude_cols_base <- keep_num
+  
+  facet_name <- NULL
+  if (!is.null(facet_by)) {
+    facet_sym  <- ensym(facet_by)
+    facet_name <- as_name(facet_sym)
+    if (!facet_name %in% names(data))
+      stop("facet_by column not found in data.")
+  }
+  
+  # specify column that controls fill (will be facet)
+  if (!is.null(shade_fill_by)) {
+    fill_name <- as_name(ensym(shade_fill_by))
+  } else {
+    fill_name <- facet_name
+  }
+  if (!is.null(fill_name))
+    exclude_cols_base <- c(exclude_cols_base, fill_name)
+  
+  # resolve global fill levels & colors (so colors are consistent across facets)
+  fill_levels <- if (!is.null(fill_name))
+    levels(droplevels(as.factor(data[[fill_name]])))
+  else
+    NULL
+  resolved_fill <- NULL
+  if (!is.null(fill_levels) && !is.null(shade_values)) {
+    if (!is.null(names(shade_values)) &&
+        any(nzchar(names(shade_values)))) {
+      resolved_fill <- shade_values[fill_levels]
+    } else {
+      resolved_fill <- rep(shade_values, length.out = length(fill_levels))
+      names(resolved_fill) <- fill_levels
+    }
+  }
+  
+  build_one <- function(df,
+                        title_text = plot_title,
+                        show_y_titles = TRUE) {
+    p_estimates <- df |>
+      mutate(outcome_name = outcome_name) |>
+      ggplot(aes(rank, outcome))
+    
+    # shaded band behind points/intervals
+    if (!is.null(shade_lower) && !is.null(shade_upper)) {
+      lower_sym <- ensym(shade_lower)
+      upper_sym <- ensym(shade_upper)
+      
+      band <- df |>
+        summarise(
+          ymin = dplyr::first(!!lower_sym),
+          ymax = dplyr::first(!!upper_sym),
+          .groups = "drop"
+        )
+      
+      if (!is.null(fill_name) && fill_name %in% names(df)) {
+        band$.__fill <- dplyr::first(df[[fill_name]])
+        p_estimates <- p_estimates +
+          geom_rect(
+            data = band,
+            aes(
+              xmin = -Inf,
+              xmax = Inf,
+              ymin = ymin,
+              ymax = ymax,
+              fill = .__fill
+            ),
+            alpha = shade_alpha,
+            inherit.aes = FALSE,
+            show.legend = FALSE
+          )
+        if (!is.null(resolved_fill)) {
+          p_estimates <- p_estimates + scale_fill_manual(values = resolved_fill, guide = "none")
+        }
+      } else {
+        p_estimates <- p_estimates +
+          geom_rect(
+            data = band,
+            aes(
+              xmin = -Inf,
+              xmax = Inf,
+              ymin = ymin,
+              ymax = ymax
+            ),
+            fill = shade_fill_constant,
+            alpha = shade_alpha,
+            inherit.aes = FALSE,
+            show.legend = FALSE
+          )
+      }
+      # ensure band is within the y-scale
+      p_estimates <- p_estimates + expand_limits(y = c(band$ymin, band$ymax))
+    }
+    
+    p_estimates <- p_estimates +
+      geom_linerange(aes(ymin = interval_lower, ymax = interval_upper)) +
+      geom_point(shape = "circle", size = 2) +
+      facet_grid(
+        outcome_name ~ .,
+        space = "free_y",
+        scales = "free_y",
+        switch = "y"
+      ) +
+      scale_y_continuous(breaks = scales::pretty_breaks()) +
+      scale_x_continuous(NULL, expand = c(.02, .02)) +
+      ylab(if (show_y_titles)
+        "Simulation results"
+        else
+          NULL) +
+      theme_minimal() +
+      theme(
+        legend.position   = "none",
+        axis.line.x       = element_blank(),
+        strip.placement   = "outside",
+        strip.background  = element_rect(fill = NA, colour = NA),
+        panel.spacing.x   = unit(0.15, "cm"),
+        strip.text.y.left = if (show_y_titles)
+          ggtext::element_markdown(
+            angle = 90,
+            face = "bold",
+            size = 7
+          )
+        else
+          element_blank(),
+        axis.text.y       = element_text(
+          angle = 0,
+          hjust = 0.5,
+          size = 6
+        ),
+        axis.title.y      = if (show_y_titles)
+          element_text(
+            size = 9,
+            face = "bold",
+            margin = margin(r = 4)
+          )
+        else
+          element_blank(),
+        panel.spacing     = unit(0.25, "lines"),
+        axis.title.x      = element_blank(),
+        axis.text.x       = element_blank(),
+        axis.ticks.x      = element_blank()
+      )
+    
+    if (!is.null(outcome_cutoff)) {
+      p_estimates <- p_estimates + geom_hline(yintercept = outcome_cutoff, linetype = "dotted")
+    }
+    
+    exclude_cols <- exclude_cols_base
+    if (!is.null(facet_name))
+      exclude_cols <- c(exclude_cols, facet_name)
+    
+    p_specs <- df |>
+      tidyr::pivot_longer(cols = -dplyr::all_of(exclude_cols)) |>
+      arrange(rank) |>
+      ggplot(aes(
+        x = rank,
+        y = factor(value),
+        color = name
+      )) +
+      geom_point(size = 3.5, shape = "|") +
+      facet_grid(name ~ .,
+                 space = "free_y",
+                 scales = "free_y",
+                 switch = "y") +
+      guides(color = "none") +
+      scale_x_continuous(NULL, expand = c(.02, .02)) +
+      ylab(if (show_y_titles)
+        "Simulation conditions"
+        else
+          NULL) +
+      theme_minimal() +
+      theme(
+        strip.placement   = "outside",
+        strip.background  = element_rect(fill = NA, colour = NA),
+        panel.spacing.x   = unit(0.15, "cm"),
+        strip.text.y.left = if (show_y_titles)
+          ggtext::element_markdown(
+            angle = 90,
+            face = "bold",
+            size = 7
+          )
+        else
+          element_blank(),
+        axis.text.y       = element_text(
+          angle = 0,
+          hjust = 1,
+          size = 6
+        ),
+        axis.title.y      = if (show_y_titles)
+          element_text(
+            size = 9,
+            face = "bold",
+            margin = margin(r = 4)
+          )
+        else
+          element_blank(),
+        panel.spacing     = unit(0.25, "lines"),
+        axis.title.x      = element_blank(),
+        axis.text.x       = element_blank(),
+        axis.ticks.x      = element_blank()
+      ) +
+      scale_color_brewer(palette = "Dark2")
+    
+    if (is.function(mutate_plots)) {
+      out <- mutate_plots(p_estimates, p_specs, df)
+      if (inherits(out, "gg")) {
+        p_estimates <- out
+      } else if (is.list(out)) {
+        if (length(out) >= 1)
+          p_estimates <- out[[1]]
+        if (length(out) >= 2)
+          p_specs     <- out[[2]]
+      }
+    }
+    
+    g_est <- ggplotGrob(p_estimates)
+    g_spc <- ggplotGrob(p_specs)
+    max_w <- unit.pmax(g_est$widths, g_spc$widths)
+    g_est$widths <- max_w
+    g_spc$widths <- max_w
+    
+    combo <- cowplot::plot_grid(
+      g_est,
+      g_spc,
+      axis = "bltr",
+      align = "v",
+      ncol = 1,
+      rel_heights = c(relative_height_of_upper_plot, 1)
+    )
+    if (!is.null(title_text)) {
+      title_grob <- cowplot::ggdraw() +
+        cowplot::draw_label(
+          title_text,
+          x = 0.5,
+          hjust = 0.5,
+          y = 1,
+          vjust = 3,
+          fontface = "bold"
+        )
+      combo <- cowplot::plot_grid(title_grob,
+                                  combo,
+                                  ncol = 1,
+                                  rel_heights = c(0.08, 1))
+    }
+    combo
+  }
+  
+  if (is.null(facet_by))
+    return(build_one(data, plot_title, show_y_titles = TRUE))
+  
+  facet_vals <- if (is.factor(data[[facet_name]]))
+    levels(droplevels(data[[facet_name]]))
+  else
+    unique(data[[facet_name]])
+  plotlist <- lapply(seq_along(facet_vals), function(i) {
+    v  <- facet_vals[i]
+    df <- dplyr::filter(data, .data[[facet_name]] == v)
+    if (nrow(df) == 0)
+      return(NULL)
+    local_title <- if (!is.null(plot_title))
+      paste0(plot_title, ": ", v)
+    else
+      paste0(facet_name, ": ", v)
+    is_left_col <- ((i - 1) %% facet_ncol) == 0
+    build_one(df, local_title, show_y_titles = is_left_col)
+  })
+  plotlist <- Filter(Negate(is.null), plotlist)
+  
+  cowplot::plot_grid(plotlist = plotlist,
+                     ncol = facet_ncol,
+                     align = "hv")
+}
+```
+
+# Load data
+
+```{r}
+# adjust acording to particular TVD-MI score type!
+tvd_mi_scores <- read_parquet("G:/Meine Ablage/Thesis/tvd_mi/tvd_mi_scores_paper_llm_review_1.parquet", as_data_frame = TRUE, mmap = TRUE) # current absolut path cause of GDrive troubles
+
+# logs <- read_parquet("G:/Meine Ablage/Thesis/tvd_mi/tvd_mi_log_paper_llm_review_1.parquet", as_data_frame = TRUE, mmap = TRUE)
+```
+
+# Content checks
+
+```{r}
+# Paper count
+tvd_mi_scores |> 
+  count(paper_id) |> 
+  filter(n != 112) |>  # Set value in dependence of amount of configurational settings
+  kable()
+
+# Configuration count
+tvd_mi_scores |> 
+  group_by(model, temperature, reasoning_effort, chain_of_thought, scope) |> 
+  summarize(row_count = n()) |> 
+  filter(row_count != 98) |> # Set value in dependence of amount of parsed papers
+  kable()
+
+# Adjusted Failure count
+failure_counts <- tvd_mi_scores |> 
+  summarize(
+    across(
+      .cols = contains("score"), 
+      .fns = ~ sum(is.na(.)), # Counts TRUE for every NA value
+      .names = "{.col}_failure_count"
+    )
+  )
+
+# Transfered into long format
+failure_counts |> 
+  pivot_longer(
+    cols = everything(), 
+    names_to = "metric", 
+    values_to = "failure_count"
+  ) |> 
+  kable()
+
+### Add any rule that ignores any paper/configuration which has produced to many failed scores?!?
+
+```
+
+# Data processing
+
+## Score transformation
+
+```{r}
+data_final_score <- tvd_mi_scores |> 
+  mutate(across(
+    contains("score"), 
+    ~ replace_na(as.numeric(.), 0) # Converts real NAs to 0 as model configurations did not provided a meaningful score
+  )) |> 
+  mutate(total_score = (tpr_avg_tvd_mi_score + fpr_avg_tvd_mi_score) / 2)
+```
+
+## Parameter transformation
+
+```{r}
+data_cleaned <- data_final_score |> 
+  mutate(
+    hyperparameter = case_when(
+      !is.na(reasoning_effort) ~ paste0("Re ", reasoning_effort),
+      !is.na(temperature) ~ paste0("Tempr ", temperature),
+      TRUE ~ "default"
+    )
+  ) |> 
+  mutate(
+    chain_of_thought = case_match(
+      chain_of_thought,
+      "Explain your thought process step by step." ~ "True",
+      NA ~ "False",
+      .default = chain_of_thought
+    ),
+    scope = case_match(
+      scope,
+      "full_text" ~ "Full text",
+      "abstract"  ~ "Abstract only",
+      .default = scope
+    )
+  )
+```
+
+## Bootstraping (preparation)
+
+```{r}
+# Create configuration label
+data_bootstraped <- data_cleaned |> 
+  unite("config", model, hyperparameter, chain_of_thought, scope,
+        sep = "_", remove = FALSE) |>
+  mutate(config_label = paste0("Config_", as.numeric(factor(config))))
+
+# Create bootstrap matrix
+bootstrap_matrix <- data_bootstraped |> 
+  select(paper_id, config_label, total_score) |> 
+  pivot_wider(names_from = config_label,
+              values_from = total_score) |> 
+  column_to_rownames("paper_id") |> 
+  as.matrix()
+
+# Store configuration keys
+config_lookup <- data_bootstraped|> 
+  distinct(config_label, model, hyperparameter, chain_of_thought, scope) |> 
+  arrange(config_label)
+
+# Parameters for bootstraping
+num_iterations <- 1000 # Check exact amount of the original paper
+n_papers <- nrow(bootstrap_matrix)
+n_configs <- ncol(bootstrap_matrix)
+
+# Create empty placeholder matrix
+boot_results <- matrix(NA, nrow = num_iterations, ncol = n_configs)
+colnames(boot_results) <- colnames(bootstrap_matrix)
+```
+
+## Bootstraping (execution)
+
+```{r}
+set.seed(42)
+
+# Run bootstrap
+for (i in 1:num_iterations) {
+  resample_idx <- sample(1:n_papers, size = n_papers, replace = TRUE)
+  boot_results[i, ] <- colMeans(bootstrap_matrix[resample_idx, , drop = FALSE])
+}
+
+# Bind statistics
+summary_stats <- data.frame(
+  config_label = colnames(bootstrap_matrix),
+  mean_tvd_mi  = colMeans(bootstrap_matrix), # The original observed mean
+  ci_lower     = apply(boot_results, 2, quantile, probs = 0.025),
+  ci_upper     = apply(boot_results, 2, quantile, probs = 0.975)
+)
+
+# Join with configuration keys
+bootstrap_report <- summary_stats |> 
+  left_join(config_lookup, by = "config_label") |> 
+  arrange(desc(mean_tvd_mi))
+
+```
+
+## Long data
+
+```{r}
+density_plot_data <- data_cleaned |> 
+  select(contains("score")) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "score_type",
+    values_to = "score_value"
+  ) |> 
+  mutate(score_type = factor(score_type,
+                             levels = c("tpr_tvd_mi_score_1",
+                                        "tpr_tvd_mi_score_2",
+                                        "tpr_avg_tvd_mi_score",
+                                        "fpr_tvd_mi_score_1",
+                                        "fpr_tvd_mi_score_2",
+                                        "fpr_avg_tvd_mi_score",
+                                        "total_score"),
+                             labels = c("TPR 1",
+                                        "TPR 2",
+                                        "TPR AVG",
+                                        "FPR 1",
+                                        "FPR 2",
+                                        "FPR AVG",
+                                        "Total score")
+                             )
+         ) |> 
+  ggplot(aes(x = score_value, fill = score_type)) +
+  geom_density(alpha = 0.5, color = "black", fill = "skyblue") +
+  scale_x_continuous(
+    breaks = c(0, 0.5, 1),
+    limits = c(0, 1)
+  ) +
+  facet_wrap(~score_type) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Score Metrics",
+    subtitle = "TPR = True positive rate; FPR = False positive rate; AVG = Average",
+    x = "Score (0-1 Range)",
+    y = "Density",
+    fill = "Metric"
+  ) +
+  theme(
+    legend.position = "none", # Hide legend since facets are labeled
+    strip.text = element_text(face = "bold")
+  )
+```
+
+## Specification curve data
+
+```{r}
+plot_spec_curve <- bootstrap_report |> 
+  select(model, hyperparameter, chain_of_thought, scope, mean_tvd_mi, ci_lower, ci_upper) |> 
+  mutate(
+    model = case_match(
+      as.character(model),
+      "deepseek-r1-distill-llama-70b" ~ "deepseek-r1-distill",
+      "llama-3.3-70b-versatile" ~ "llama-3.3-70b",
+      "o3-mini-2025-01-31" ~ "o3-mini",
+      "o4-mini-2025-04-16" ~ "o4-mini",
+      "gpt-3.5-turbo-0125" ~ "gpt-3.5-turbo",
+      "gpt-4o-mini-2024-07-18" ~ "gpt-4o-mini",
+      "gpt-4o-2024-08-06" ~ "gpt-4o",
+      "gpt-5-nano-2025-08-07" ~ "gpt-5-nano",
+      "gpt-5-mini-2025-08-07" ~ "gpt-5-mini"),
+    model = fct_relevel(
+      as.factor(model),
+      "deepseek-r1-distill",
+      "llama-3.3-70b",
+      "o3-mini",
+      "o4-mini",
+      "gpt-3.5-turbo",
+      "gpt-4o-mini",
+      "gpt-4o",
+      "gpt-5-nano",
+      "gpt-5-mini"
+    ),
+    hyperparameter = fct_relevel(
+      as.factor(hyperparameter),
+      "Tempr 1.5",
+      "Tempr 1",
+      "Tempr 0.5",
+      "Tempr 0",
+      "Re high",
+      "Re low"
+    ),
+    chain_of_thought = fct_relevel(
+      as.factor(chain_of_thought),
+      "True",
+      "False"
+    ),
+    scope = fct_relevel(
+      as.factor(scope),
+      "Full text",
+      "abstract"
+    )
+  ) |> 
+  arrange(mean_tvd_mi) |>
+  mutate(rank = row_number()) |> 
+  rename(
+    `Model` = model,
+    `Hyperparameter` = hyperparameter,
+    `CoT<br> used` = chain_of_thought,
+    `Scope` = scope
+  ) |> 
+  specification_curve_plot(
+    outcome = mean_tvd_mi,
+    outcome_name = "TVD-MI score",
+    plot_title = "Ranking reviews",
+    interval_lower = "ci_lower",
+    interval_upper = "ci_upper",
+    rank_by = rank,
+    mutate_plots = \(top, bottom) list(top + coord_cartesian(ylim = c(0, 1)))
+  )
+```
+
+# Analyses
+
+## Score distribution (exploratory check)
+
+```{r}
+density_plot_data
+```
+
+## Specification curve
+
+```{r}
+plot_spec_curve
+```
