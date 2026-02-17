@@ -1,0 +1,4 @@
+"0","AMOUNT_SETTINGS <- 112 # Set to expected amount of configuration setting"
+"0","AMOUNT_PAPERS <- 98 # Set to expected amount of parsed papers"
+"0","NUM_ITERATIONS <- 1000 # As Robertson and Kayejo (in their repo)"
+"0","CONFIDENCE_LVL <- 0.95 # As Robertson adn Kayejo (in their repo)"

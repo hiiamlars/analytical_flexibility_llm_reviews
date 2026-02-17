@@ -1,0 +1,5 @@
+"0","# Paper count"
+"0","paper_llm_score |> "
+"0","  count(paper_id) |> "
+"0","  filter(n != AMOUNT_SETTINGS) |> "
+"0","  kable()"
