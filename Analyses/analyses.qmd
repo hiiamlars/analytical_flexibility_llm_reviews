@@ -1,6 +1,8 @@
 ---
 title: "Analyses"
 author: "Lars Schilling"
+date: last-modified
+date-format: "YYYY-MM-DD HH:mm:ss"
 bibliography: references.bib
 csl: apa.csl
 editor: visual
@@ -26,11 +28,10 @@ knitr::opts_chunk$set(
 )
 ```
 
-
 # Dependencies
 
 ```{r}
-working_dir <- "G:/Meine Ablage/Thesis/tvd_mi/"
+working_dir <- "G:/Meine Ablage/Analytic_flexbility_llm_reviews/simulated_data/tvd_mi"
 
 paper_llm_score_name <- "tvd_mi_scores_paper_llm_review_1.parquet"
 
@@ -55,7 +56,7 @@ CLEAN_SCORE_COLS <- c(
   "TPR 1", "TPR 2", "TPR AVG", 
   "FPR 1", "FPR 2", "FPR AVG"
 ) # Set to wanted score labels
-TOTAL_SCORE_COL <- "total_score" # Set to created total score column
+TOTAL_SCORE_COL <- "tvd_mi_score" # Set to created total score column
 
 # Bootstrap settings
 NUM_ITERATIONS <- 1000
@@ -67,7 +68,7 @@ ALPHA <- 0.05
 POST_HOC_CORRECTION = "bonferroni"
 ```
 
-```{r}
+```{r, results= 'hide'}
 load_pkg <- function(pkg) {
   if (!require(pkg, character.only = TRUE)) {
     install.packages(pkg, dependencies = TRUE)
@@ -107,7 +108,7 @@ paper_human_score <- read_parquet(full_path_paper_human,
 
 # Content checks
 
-As multiple runs of APIs possibly created duplicate paper/configuration pairs, these have to be cleaned first. Besides that, the function creates metadata-columns which indicate weather combinations of paper and configuration have been attempted and yielded valid TPRs and FPRs.
+As multiple runs of APIs possibly created duplicate paper/configuration pairs, these have to be cleaned first. Besides that, the function creates metadata-columns which indicate weather combinations of paper and configuration have been attempted, and weather they yielded valid TPRs and FPRs in that case.
 
 ```{r}
 # Helper function to clean duplicates with granular success flags
@@ -129,7 +130,7 @@ clean_duplicates_function <- function(df,
       
       # Fail and skip flags for the compelete tier list
       is_failed  = (.data[[tpr_col]] %in% fail_msg | .data[[fpr_col]] %in% fail_msg),
-      is_skipped = (.data[[tpr_col]] %in% skip_msg & .data[[fpr_col]] %in% skip_msg)
+      is_skipped = (.data[[tpr_col]] %in% skip_msg & .data[[fpr_col]] %in% skip_msg),
     ) |>
     mutate(
       quality_tier = case_when(
@@ -162,28 +163,27 @@ paper_human_score_cld <- clean_duplicates_function(paper_human_score,
                                                   "fpr_avg_tvd_mi_score")
 ```
 
-Now the completeness of paper/configuration pairs can be checked.
+# Completness checks
+
+Incomplete or frequently skipped/invalid combinations papers, configurations and combinations are not dropped, but in case the following indicates odd results these will be taken into consideration in the result interpretation. ###! Is it OK to do that or should I also define a exclusion criteria when I write such code?
 
 ## LLM-authored reviews
 
-The first table shows the amount of processed configurations per paper for all papers who have not been processed comepletly.
-The second table shows the amount of processed papers per configurations for all configurations who have not been processed comepletly.
-The third table is a summary of how many combination of paper and configuration have been processed and what success status they reached.
-The fourth table gives out the amount of processed papers and their success status for each configuration.
-The fifth table givous out the amount of processed configurations and their success status for each paper.
-
-###! I feel like all of these tables are a bit to much. I would prefer to keep the summary only. What do you think?
+### Any incomplete processed papers?
 
 ```{r}
-# Any incompletly processed papers?
 paper_llm_score_cld |> 
   count(`Paper ID` = paper_id) |> 
   filter(n != AMOUNT_SETTINGS) |> 
   rename(`Amount of processed configurations` = n) |> 
   kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) |> 
+  scroll_box(width = "100%", height = "400px")
+```
 
-# Any incompletely processsed configurations?
+### Any incompletely proccessed configurations?
+
+```{r}
 paper_llm_score_cld |> 
   group_by(Model = model, Temperature = temperature, `Reasoning effort` = reasoning_effort,
            CoT = chain_of_thought, `Scope` = scope, ) |> 
@@ -192,8 +192,13 @@ paper_llm_score_cld |>
   filter(row_count != AMOUNT_PAPERS) |>
   rename(`Amount of processed papers` = row_count) |> 
   kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) |> 
+  scroll_box(width = "100%", height = "400px")
+```
 
+### Status summary global:
+
+```{r}
 # Global
 paper_llm_score_cld |>
   summarize(
@@ -206,9 +211,12 @@ paper_llm_score_cld |>
   mutate(`Success rate`= paste0(round((`Amount of valid results` / `Total amount of combinations`) * 100, 1), "%")) |>
   kable(format = "html", align = "r") |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
-                full_width = F)  
-  
-# By configuration
+                full_width = F) 
+```
+
+### Status Summary by configuration:
+
+```{r}
 paper_llm_score_cld |>
   group_by(model, temperature, reasoning_effort, chain_of_thought, scope) |>
   summarize(
@@ -222,9 +230,13 @@ paper_llm_score_cld |>
   arrange(`Success rate`) |> 
   kable(format = "html", align = "r") |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-                full_width = F)
+                full_width = F) |> 
+  scroll_box(width = "100%", height = "400px")
+```
 
-# By paper
+### Status summary by paper:
+
+```{r}
 paper_llm_score_cld |>
   group_by(`Paper ID` = paper_id) |>
   summarize(
@@ -238,24 +250,27 @@ paper_llm_score_cld |>
   arrange(`Success rate`) |> 
   kable(format = "html", align = "r") |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-                full_width = F)
+                full_width = F) |> 
+  scroll_box(width = "100%", height = "400px")
 ```
 
 ## Human-authored reviews
 
-The first table shows which paper has been processed other than a single time.
-The second table shows for each paper if it yielded a valid result in the identification game or a failed result.
-###! Here I feel like I can not summarize the tables but they take much space. Should I drop this information?
+### Any not processed papers?
 
 ```{r}
-# Any not processed papers?
 paper_human_score_cld |> 
   count(`Paper ID` = paper_id) |> 
   rename(`Amount` = n) |> 
   filter(`Amount` != 1) |> 
   kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) |> 
+  scroll_box(width = "100%", height = "400px")
+```
 
+### Status summary by paper:
+
+```{r}
 paper_human_score_cld |>
   group_by(`Paper ID` = paper_id) |>
   summarize(
@@ -265,14 +280,15 @@ paper_human_score_cld |>
   ) |>
   arrange(`Failed result`, `Valid result`) |>
   kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) |> 
+  scroll_box(width = "100%", height = "400px")
 ```
 
 # Calculations
 
 ## Score transformation and calculations
 
-The `total_score` column contains the final TVD-MI metric. The new column `hyperparameter` combines the information for reasoning and non-reasoning models. The performance mean, the absolute distance to this mean and the succcess rates are calculated. For the human dataset, the success rate is by definition set to 1.
+The `total_score` column contains the final TVD-MI metric. The new column `hyperparameter` combines the information for temperature parameter or reasoning effort parameter. The mean success rate and the mean TVD-MI per configuration group are calculated. For the human data, the success rate is by definition set to 1.
 
 ```{r}
 # 1. Human Data Processing (Baseline)
@@ -280,27 +296,14 @@ paper_human_processed <- paper_human_score_cld |>
   mutate(paper_id = as.factor(paper_id)) |> 
   mutate(across(contains("score"), ~ suppressWarnings(as.numeric(.)))) |> 
   mutate(
-    total_score = (tpr_avg_tvd_mi_score - fpr_avg_tvd_mi_score),
+    tvd_mi_score = (tpr_avg_tvd_mi_score - fpr_avg_tvd_mi_score),
     
     # Success rates (Metric 1); Human validity is 100% by definition
-    is_valid = 1,
-    is_valid_tpr = 1,
-    is_valid_fpr = 1,
+    success_rate = 1,
     
-    # Performance means (Metric 2)
-    group_mean = if(all(is.na(total_score))) NA_real_ else mean(total_score, na.rm = TRUE),
-    tpr_mean   = if(all(is.na(tpr_avg_tvd_mi_score))) NA_real_ else mean(tpr_avg_tvd_mi_score, na.rm = TRUE),
-    fpr_mean   = if(all(is.na(fpr_avg_tvd_mi_score))) NA_real_ else mean(fpr_avg_tvd_mi_score, na.rm = TRUE),
-    
-    # Individual Absolute Deviations
-    abs_dev     = abs(total_score - group_mean),
-    tpr_abs_dev = abs(tpr_avg_tvd_mi_score - tpr_mean),
-    fpr_abs_dev = abs(fpr_avg_tvd_mi_score - fpr_mean),
-    
-    # Mean Absolute Deviation (Metric 3)
-    mad_mean     = if(all(is.na(abs_dev))) NA_real_ else mean(abs_dev, na.rm = TRUE),
-    tpr_mad_mean = if(all(is.na(tpr_abs_dev))) NA_real_ else mean(tpr_abs_dev, na.rm = TRUE),
-    fpr_mad_mean = if(all(is.na(fpr_abs_dev))) NA_real_ else mean(fpr_abs_dev, na.rm = TRUE)
+    # Performance means (Metric 2 and 3)
+    group_mean = if(all(is.na(tvd_mi_score))) NA_real_ else mean(tvd_mi_score, na.rm = TRUE),
+
   ) |> 
   rename_with(~ paste0(., "_human"), .cols = -c(paper_id)) |> 
   mutate(config_label_human = "Human_Global")
@@ -309,7 +312,6 @@ paper_human_processed <- paper_human_score_cld |>
 paper_llm_processed <- paper_llm_score_cld |> 
   mutate(paper_id = as.factor(paper_id)) |> 
   mutate(across(contains("score"), ~ suppressWarnings(as.numeric(.)))) |> 
-  mutate(total_score = (tpr_avg_tvd_mi_score - fpr_avg_tvd_mi_score)) |> 
   mutate(
     model = case_match(
       model,
@@ -342,6 +344,10 @@ paper_llm_processed <- paper_llm_score_cld |>
       .default = scope
     )
   ) |> 
+  mutate(
+    tvd_mi_score = (tpr_avg_tvd_mi_score - fpr_avg_tvd_mi_score),
+    is_created = (1 - is_skipped)
+    ) |> 
   unite("temp_config_str", all_of(CONFIG_COL), sep = "_", remove = FALSE) |> 
   mutate(
     config_id = as.numeric(factor(temp_config_str, levels = unique(temp_config_str))),
@@ -351,62 +357,32 @@ paper_llm_processed <- paper_llm_score_cld |>
   group_by(config_label) |> 
   mutate(
     # Success rates (Metric 1)
-    success_rate     = mean(is_valid, na.rm = TRUE),
-    success_rate_tpr = mean(is_valid_tpr, na.rm = TRUE),
-    success_rate_fpr = mean(is_valid_fpr, na.rm = TRUE),
-    
+    success_rate     = mean(is_created, na.rm = TRUE),
+
     # Performance means (Metric 2)
-    group_mean = if(all(is.na(total_score))) NA_real_ else mean(total_score, na.rm = TRUE),
-    tpr_mean   = if(all(is.na(tpr_avg_tvd_mi_score))) NA_real_ else mean(tpr_avg_tvd_mi_score, na.rm = TRUE),
-    fpr_mean   = if(all(is.na(fpr_avg_tvd_mi_score))) NA_real_ else mean(fpr_avg_tvd_mi_score, na.rm = TRUE),
-    
-    # Individual Absolute Deviations
-    abs_dev     = abs(total_score - group_mean),
-    tpr_abs_dev = abs(tpr_avg_tvd_mi_score - tpr_mean),
-    fpr_abs_dev = abs(fpr_avg_tvd_mi_score - fpr_mean),
-    
-    # Mean Absolute Deviation (Metric 3)
-    mad_mean     = if(all(is.na(abs_dev))) NA_real_ else mean(abs_dev, na.rm = TRUE),
-    tpr_mad_mean = if(all(is.na(tpr_abs_dev))) NA_real_ else mean(tpr_abs_dev, na.rm = TRUE),
-    fpr_mad_mean = if(all(is.na(fpr_abs_dev))) NA_real_ else mean(fpr_abs_dev, na.rm = TRUE)
+    group_mean = if(all(is.na(tvd_mi_score))) NA_real_ else mean(tvd_mi_score, na.rm = TRUE),
   ) |> 
   ungroup() |>
   left_join(paper_human_processed |> 
               dplyr::select(
                 paper_id,
-                is_valid_human,
-                is_valid_tpr_human,
-                is_valid_fpr_human,
-                total_score_human,
-                group_mean_human,
-                tpr_mean_human,
-                fpr_mean_human,
-                mad_mean_human,
-                tpr_mad_mean_human,
-                fpr_mad_mean_human
+                success_rate_human,
+                tvd_mi_score_human,
+                group_mean_human
               ),
             by = "paper_id"
   )
 
 # 3. Summary table
 summary_table <- paper_llm_processed |> 
-  group_by(config_id, model, hyperparameter, chain_of_thought, scope) |> 
+  group_by(config_id) |> 
   summarize(
     
     # Success
     mean_success_rate     = first(success_rate),
-    mean_success_rate_tpr = first(success_rate_tpr),
-    mean_success_rate_fpr = first(success_rate_fpr),
     
     # Performance (Mean)
     mean_score     = first(group_mean),
-    mean_tpr_score = first(tpr_mean),
-    mean_fpr_score = first(fpr_mean),
-    
-    # Stability (MAD)
-    mean_mad     = first(mad_mean),
-    mean_tpr_mad = first(tpr_mad_mean),
-    mean_fpr_mad = first(fpr_mad_mean),
     
     .groups = "drop"
   )
@@ -414,7 +390,7 @@ summary_table <- paper_llm_processed |>
 
 ## Bootstraping
 
-The bootstrap randomly selects 1000 values with replacing for the given metric and averages across all these values. NAs are ignored in this part. Values at the alpha level / 2 are extracted as lower and upper bounds.
+The bootstrap randomly selects 1000 values with replacing for the given metric and averages across all these values. This process is done for each configuration group. Total scores are ignored. Values at the alpha level / 2 are extracted as lower and upper bounds.
 
 ```{r}
 # Configuration
@@ -425,17 +401,11 @@ global_alpha <- (1 - confidence_lvl) / 2
 # Helper function
 bootstrap_function <- function(df, 
                               group_col,
-                              val_col,
-                              tpr_val_col, 
-                              fpr_val_col,
-                              dev_col,
-                              tpr_dev_col,
-                              fpr_dev_col,
-                              is_valid_col,
-                              is_tpr_valid_col,
-                              is_fpr_valid_col,
+                              score_col,
+                              is_created_col = NULL, # Optional
                               iterations = num_iterations, 
-                              alpha = global_alpha) {
+                              alpha = global_alpha,
+                              calc_success = FALSE) {
   
   set.seed(42)
   
@@ -445,25 +415,20 @@ bootstrap_function <- function(df,
       slice_sample(prop = 1, replace = TRUE) |> 
       summarise(
         # Plot 1: Success
-        boot_success     = mean(.data[[is_valid_col]], na.rm = TRUE),
-        boot_success_tpr = mean(.data[[is_tpr_valid_col]], na.rm = TRUE),
-        boot_success_fpr = mean(.data[[is_fpr_valid_col]], na.rm = TRUE),
+        boot_success = if (calc_success) {
+          mean(.data[[is_created_col]], na.rm = TRUE)
+        } else {
+          NA_real_
+        },
         
         # Plot 2: Performance
-        boot_mean     = mean(.data[[val_col]], na.rm = TRUE),
-        boot_mean_tpr = mean(.data[[tpr_val_col]], na.rm = TRUE),
-        boot_mean_fpr = mean(.data[[fpr_val_col]], na.rm = TRUE),
-        
-        # Plot 3: Stability (MAD)
-        boot_mad     = mean(.data[[dev_col]], na.rm = TRUE),
-        boot_mad_tpr = mean(.data[[tpr_dev_col]], na.rm = TRUE),
-        boot_mad_fpr = mean(.data[[fpr_dev_col]], na.rm = TRUE),
+        boot_mean = mean(.data[[score_col]], na.rm = TRUE),
         
         .groups = "drop"
       )
   })
   
-  # Calculate Quantiles
+  # Calculate quantiles
   ci_results <- boot_distribution |> 
     group_by(.data[[group_col]]) |> 
     summarise(
@@ -474,42 +439,32 @@ bootstrap_function <- function(df,
       .groups = "drop"
     )
   
+  # Delete empty columns
+  if (!calc_success) {
+    ci_results <- ci_results |> dplyr::select(-starts_with("boot_success"))
+  }
+  
   return(ci_results)
 }
 ```
 
 ```{r}
 llm_boot_summary <- bootstrap_function(
-  df               = paper_llm_processed,
-  group_col        = "config_label",
-  val_col          = "total_score",
-  tpr_val_col      = "tpr_avg_tvd_mi_score",
-  fpr_val_col      = "fpr_avg_tvd_mi_score",
-  dev_col          = "abs_dev",
-  tpr_dev_col      = "tpr_abs_dev",
-  fpr_dev_col      = "fpr_abs_dev",
-  is_valid_col     = "is_valid",
-  is_tpr_valid_col = "is_valid_tpr",
-  is_fpr_valid_col = "is_valid_fpr"
+  df = paper_llm_processed,
+  group_col = "config_label",
+  score_col = "tvd_mi_score",
+  is_created_col = "is_created",
+  calc_success = TRUE
 )
 
 human_boot_summary <- bootstrap_function(
-  df               = paper_human_processed,
-  group_col        = "config_label_human",
-  val_col          = "total_score_human",
-  tpr_val_col      = "tpr_avg_tvd_mi_score_human",
-  fpr_val_col      = "fpr_avg_tvd_mi_score_human",
-  dev_col          = "abs_dev_human",
-  tpr_dev_col      = "tpr_abs_dev_human",
-  fpr_dev_col      = "fpr_abs_dev_human",
-  is_valid_col     = "is_valid_human",
-  is_tpr_valid_col = "is_valid_tpr_human",
-  is_fpr_valid_col = "is_valid_fpr_human"
+  df = paper_human_processed,
+  group_col = "config_label_human",
+  score_col = "tvd_mi_score_human",
 )
 ```
 
 ```{r}
-# Join bootstrap results
 paper_llm_processed_bind <- paper_llm_processed |> 
   left_join(llm_boot_summary, by = "config_label") |> 
   cross_join(
@@ -545,7 +500,7 @@ data_plot <- paper_llm_processed_bind |>
   ) |> 
   rename(
     `Model` = model,
-    `Hyperparameter` = hyperparameter,
+    `Hyper-<br> parameter` = hyperparameter,
     `CoT<br> used` = chain_of_thought,
     `Scope` = scope
   )
@@ -621,6 +576,7 @@ The plot function for a specification curve is taken from [@cumminsThreatAnalyti
 specification_curve_plot_with_shading <- function(data,
                                                   outcome = "outcome",
                                                   outcome_name = "Outcome",
+                                                  is_processed = NULL,
                                                   plot_title = NULL,
                                                   interval_lower = NULL,
                                                   interval_upper = NULL,
@@ -648,6 +604,13 @@ specification_curve_plot_with_shading <- function(data,
   data <- data |>
     rename(outcome = {{outcome}}, rank = {{rank_by}})
   
+  # REFINEMENT
+  if (rlang::quo_is_null(rlang::enquo(is_processed)) || rlang::quo_is_missing(rlang::enquo(is_processed))) {
+    data <- data |> mutate(is_processed = 1.0)
+  } else {
+    data <- data |> mutate(is_processed = {{is_processed}})
+  }
+  
   if (!is.null(interval_lower))
     data <- data |> rename(interval_lower = {{interval_lower}})
   else
@@ -660,7 +623,7 @@ specification_curve_plot_with_shading <- function(data,
   if (rank_by_outcome)
     data <- data |> arrange(outcome) |> mutate(rank = dplyr::row_number())
   
-  keep_num <- c("rank", "outcome", "interval_lower", "interval_upper")
+  keep_num <- c("rank", "outcome", "interval_lower", "interval_upper", "is_processed")
   if (!is.null(shade_lower))
     keep_num <- c(keep_num, as_name(ensym(shade_lower)))
   if (!is.null(shade_upper))
@@ -768,7 +731,8 @@ specification_curve_plot_with_shading <- function(data,
     p_estimates <- p_estimates +
       geom_ribbon(aes(ymin = interval_lower, ymax = interval_upper), 
                   fill = "#ADD8E6", alpha = 0.4) +
-      geom_point(shape = "circle", size = 2) +
+      geom_point(aes(alpha = is_processed), shape = "circle", size = 2) + # REFINEMENT
+      scale_alpha_continuous(range = c(0.4, 1.0), guide = "none") +
       facet_grid(
         outcome_name ~ .,
         space = "free_y",
@@ -817,7 +781,7 @@ specification_curve_plot_with_shading <- function(data,
       )
     
     if (!is.null(outcome_cutoff)) {
-      p_estimates <- p_estimates + geom_hline(yintercept = outcome_cutoff, linetype = "dotted")
+      p_estimates <- p_estimates + geom_hline(yintercept = outcome_cutoff, linetype = "dashed") # REFINEMENT
     }
     
     exclude_cols <- exclude_cols_base
@@ -952,7 +916,10 @@ specification_curve_plot_with_shading <- function(data,
 
 ## Distribution llm scores
 
+This plot does not have any inference criteria. The only purpose of this plot is to see how scores are distributed generally.
+
 ```{r}
+###! If I have no inference for this plot, should I even include them?
 paper_llm_scores <- bar_function(
   dataset      = paper_llm_processed,
   base_cols    = BASE_SCORE_COLS,
@@ -964,6 +931,8 @@ paper_llm_scores
 ```
 
 ## Distribution human scores
+
+This plot does not have any inference criteria. The only purpose of this plot is to see how scores are distributed generally.
 
 ```{r}
 paper_human_scores <- bar_function(
@@ -980,13 +949,11 @@ paper_human_scores
 ## Success rate
 
 ```{r}
-###! My idea is to place all the tpr/fpr plots beside the main TVD-MI score plots or to put them in the appendix; In case I keep all nine plots, should I wrapp all of this into a function?
-
 success_spec_plot <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
-    `Hyperparameter`, 
+    `Hyper-<br> parameter`, 
     `CoT<br> used`, 
     `Scope`, 
     success_rate,
@@ -994,7 +961,7 @@ success_spec_plot <- data_plot |>
     boot_success_upper
   ) |>  
   # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |>
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Scope) |>
   summarise(
     success_rate = mean(success_rate),
     boot_success_lower = mean(boot_success_lower),
@@ -1007,6 +974,7 @@ success_spec_plot <- data_plot |>
   specification_curve_plot_with_shading(
   outcome = success_rate,
   outcome_name = "Success rate TVD-MI",
+  outcome_cutoff = 1.0,
   plot_title = "Specification Curve: Success rate by Configuration",
   interval_lower = "boot_success_lower",
   interval_upper = "boot_success_upper",
@@ -1018,112 +986,36 @@ success_spec_plot <- data_plot |>
 )
 ```
 
-```{r}
-success_tpr_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyperparameter`, 
-    `CoT<br> used`, 
-    `Scope`, 
-    success_rate_tpr,
-    boot_success_tpr_lower,      
-    boot_success_tpr_upper
-  ) |>  
-  # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |>
-  summarise(
-    success_rate_tpr = mean(success_rate_tpr),
-    boot_success_tpr_lower = mean(boot_success_tpr_lower),
-    boot_success_tpr_upper = mean(boot_success_tpr_upper),
-    .groups = "drop"
-  ) |> 
-  arrange(success_rate_tpr) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-  outcome = success_rate_tpr,
-  outcome_name = "Success rate TPR",
-  plot_title = "Specification Curve: Success rate by Configuration",
-  interval_lower = "boot_success_tpr_lower",
-  interval_upper = "boot_success_tpr_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 1)))
-  }
-)
-```
-
-
-```{r}
-success_fpr_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyperparameter`, 
-    `CoT<br> used`, 
-    `Scope`, 
-    success_rate_fpr,
-    boot_success_fpr_lower,      
-    boot_success_fpr_upper
-  ) |>  
-  # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |>
-  summarise(
-    success_rate_fpr = mean(success_rate_fpr),
-    boot_success_fpr_lower = mean(boot_success_fpr_lower),
-    boot_success_fpr_upper = mean(boot_success_fpr_upper),
-    .groups = "drop"
-  ) |> 
-  arrange(success_rate_fpr) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-  outcome = success_rate_fpr,
-  outcome_name = "Success rate FPR",
-  plot_title = "Specification Curve: Success rate by Configuration",
-  interval_lower = "boot_success_fpr_lower",
-  interval_upper = "boot_success_fpr_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 1)))
-  }
-)
-```
-
+This plot shows for how many papers in a given parameter combination the review generation was successful.
 
 ```{r}
 success_spec_plot
-
-success_tpr_spec_plot
-
-success_fpr_spec_plot
 ```
 
 ## Mean
 
 ```{r}
-###! The quality assessment ignores how many unsuccessful combos a configuration had. Should I include this information, e.g. via the transparency of the data point (alpha) or might this more confusing than helpful?
+###! The quality assessment ignores how many unsuccessful combos a configuration had. I have included this information via the transparency of the data point (alpha). Should I keep or drop this?
 
 mean_spec_plot <- data_plot |> 
   # Preprocess
   dplyr::select(
     `Model`, 
-    `Hyperparameter`, 
+    `Hyper-<br> parameter`, 
     `CoT<br> used`, 
     `Scope`, 
-    group_mean, 
+    group_mean,
+    success_rate,
     boot_mean_lower, 
     boot_mean_upper,
     boot_mean_lower_human, 
     boot_mean_upper_human
   ) |> 
   # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |> 
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Scope) |> 
   summarize(
     group_mean = mean(group_mean),
+    success_rate = mean(success_rate),
     boot_mean_lower = mean(boot_mean_lower),
     boot_mean_upper = mean(boot_mean_upper),
     boot_mean_lower_human = mean(boot_mean_lower_human),
@@ -1140,6 +1032,7 @@ mean_spec_plot <- data_plot |>
     plot_title = "Specification Curve: Mean by Configuration",
     interval_lower = "boot_mean_lower",
     interval_upper = "boot_mean_upper",
+    is_processed = success_rate,
     rank_by = rank,
     # CI base
     shade_lower = "boot_mean_lower_human",
@@ -1151,247 +1044,10 @@ mean_spec_plot <- data_plot |>
   )
 ```
 
-```{r}
-mean_spec_tpr_plot <- data_plot |> 
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyperparameter`, 
-    `CoT<br> used`, 
-    `Scope`, 
-    tpr_mean, 
-    boot_mean_tpr_lower, 
-    boot_mean_tpr_upper,
-    boot_mean_tpr_lower_human, 
-    boot_mean_tpr_upper_human
-  ) |> 
-  # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |> 
-  summarize(
-    tpr_mean = mean(tpr_mean),
-    boot_mean_tpr_lower = mean(boot_mean_tpr_lower),
-    boot_mean_tpr_upper = mean(boot_mean_tpr_upper),
-    boot_mean_tpr_lower_human = mean(boot_mean_tpr_lower_human),
-    boot_mean_tpr_upper_human = mean(boot_mean_tpr_upper_human),
-    .groups = "drop"
-  ) |> 
-  arrange(tpr_mean) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-    # Basic content
-    outcome = tpr_mean,
-    outcome_name = "Mean TPR",
-    plot_title = "Specification Curve: Mean by Configuration",
-    interval_lower = "boot_mean_tpr_lower",
-    interval_upper = "boot_mean_tpr_upper",
-    rank_by = rank,
-    # CI base
-    shade_lower = "boot_mean_tpr_lower_human",
-    shade_upper = "boot_mean_tpr_upper_human",
-    
-    mutate_plots = \(top, bottom, df) {
-      list(top + coord_cartesian(ylim = c(-1, 1)))
-    }
-  )
-```
-
-```{r}
-mean_spec_fpr_plot <- data_plot |> 
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyperparameter`, 
-    `CoT<br> used`, 
-    `Scope`, 
-    fpr_mean, 
-    boot_mean_fpr_lower, 
-    boot_mean_fpr_upper,
-    boot_mean_fpr_lower_human, 
-    boot_mean_fpr_upper_human
-  ) |> 
-  # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |> 
-  summarize(
-    fpr_mean = mean(fpr_mean),
-    boot_mean_fpr_lower = mean(boot_mean_fpr_lower),
-    boot_mean_fpr_upper = mean(boot_mean_fpr_upper),
-    boot_mean_fpr_lower_human = mean(boot_mean_fpr_lower_human),
-    boot_mean_fpr_upper_human = mean(boot_mean_fpr_upper_human),
-    .groups = "drop"
-  ) |> 
-  arrange(fpr_mean) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-    # Basic content
-    outcome = fpr_mean,
-    outcome_name = "Mean FPR",
-    plot_title = "Specification Curve: Mean by Configuration",
-    interval_lower = "boot_mean_fpr_lower",
-    interval_upper = "boot_mean_fpr_upper",
-    rank_by = rank,
-    # CI base
-    shade_lower = "boot_mean_fpr_lower_human",
-    shade_upper = "boot_mean_fpr_upper_human",
-    
-    mutate_plots = \(top, bottom, df) {
-      list(top + coord_cartesian(ylim = c(-1, 1)))
-    }
-  )
-```
+This plot indicates the average quality of LLM-authored reviews for each parameter combination. Note that this plot does not consider for how many of the papers the parameter combination yielded a review in the first place.
 
 ```{r}
 mean_spec_plot
-
-mean_spec_tpr_plot
-
-mean_spec_fpr_plot
-```
-
-## Distance
-
-```{r}
-distance_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyperparameter`, 
-    `CoT<br> used`, 
-    `Scope`, 
-    mad_mean, 
-    boot_mad_lower, 
-    boot_mad_upper,
-    boot_mad_lower_human,
-    boot_mad_upper_human
-  ) |> 
-  # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |> 
-  summarize(
-    mad_mean = mean(mad_mean),
-    boot_mad_lower = mean(boot_mad_lower),
-    boot_mad_upper = mean(boot_mad_upper),
-    boot_mad_lower_human = mean(boot_mad_lower_human),
-    boot_mad_upper_human = mean(boot_mad_upper_human),
-    .groups = "drop"
-  ) |> 
-  arrange(mad_mean) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-    # Basic content
-    outcome = mad_mean,
-    outcome_name = "Avg. dis. to<br>mean TVD-MI score",
-    plot_title = "Specification Curve: Average distance by Configuration",
-    interval_lower = "boot_mad_lower",
-    interval_upper = "boot_mad_upper",
-    rank_by = rank,
-    # CI base
-    shade_lower = "boot_mad_lower_human",
-    shade_upper = "boot_mad_upper_human",
-    
-    mutate_plots = \(top, bottom, df) {
-      list(top + coord_cartesian(ylim = c(-1, 1)))
-    }
-  )
-```
-
-```{r}
-distance_tpr_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyperparameter`, 
-    `CoT<br> used`, 
-    `Scope`, 
-    tpr_mad_mean, 
-    boot_mad_tpr_lower, 
-    boot_mad_tpr_upper,
-    boot_mad_tpr_lower_human,
-    boot_mad_tpr_upper_human
-  ) |> 
-  # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |> 
-  summarize(
-    tpr_mad_mean = mean(tpr_mad_mean),
-    boot_mad_tpr_lower = mean(boot_mad_tpr_lower),
-    boot_mad_tpr_upper = mean(boot_mad_tpr_upper),
-    boot_mad_tpr_lower_human = mean(boot_mad_tpr_lower_human),
-    boot_mad_tpr_upper_human = mean(boot_mad_tpr_upper_human),
-    .groups = "drop"
-  ) |> 
-  arrange(tpr_mad_mean) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-    # Basic content
-    outcome = tpr_mad_mean,
-    outcome_name = "Avg. dis. to mean TPR",
-    plot_title = "Specification Curve: Average distance by Configuration",
-    interval_lower = "boot_mad_tpr_lower",
-    interval_upper = "boot_mad_tpr_upper",
-    rank_by = rank,
-    # CI base
-    shade_lower = "boot_mad_tpr_lower_human",
-    shade_upper = "boot_mad_tpr_upper_human",
-    
-    mutate_plots = \(top, bottom, df) {
-      list(top + coord_cartesian(ylim = c(-1, 1)))
-    }
-  )
-```
-
-```{r}
-distance_fpr_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyperparameter`, 
-    `CoT<br> used`, 
-    `Scope`, 
-    fpr_mad_mean, 
-    boot_mad_fpr_lower, 
-    boot_mad_fpr_upper,
-    boot_mad_fpr_lower_human,
-    boot_mad_fpr_upper_human
-  ) |> 
-  # Summarize
-  group_by(Model, Hyperparameter, `CoT<br> used`, Scope) |> 
-  summarize(
-    fpr_mad_mean = mean(fpr_mad_mean),
-    boot_mad_fpr_lower = mean(boot_mad_fpr_lower),
-    boot_mad_fpr_upper = mean(boot_mad_fpr_upper),
-    boot_mad_fpr_lower_human = mean(boot_mad_fpr_lower_human),
-    boot_mad_fpr_upper_human = mean(boot_mad_fpr_upper_human),
-    .groups = "drop"
-  ) |> 
-  arrange(fpr_mad_mean) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-    # Basic content
-    outcome = fpr_mad_mean,
-    outcome_name = "Avg. dis. to mean FPR",
-    plot_title = "Specification Curve: Average distance by Configuration",
-    interval_lower = "boot_mad_fpr_lower",
-    interval_upper = "boot_mad_fpr_upper",
-    rank_by = rank,
-    # CI base
-    shade_lower = "boot_mad_fpr_lower_human",
-    shade_upper = "boot_mad_fpr_upper_human",
-    
-    mutate_plots = \(top, bottom, df) {
-      list(top + coord_cartesian(ylim = c(-1, 1)))
-    }
-  )
-```
-
-```{r}
-distance_spec_plot
-
-distance_tpr_spec_plot
-
-distance_fpr_spec_plot
 ```
 
 # Inferential tests
@@ -1449,91 +1105,17 @@ conditional_posthoc_function <- function(model, alpha = 0.05, adjust = "bonferro
 }
 ```
 
-## Success rates
-
-```{r}
-# 1. Total TVD-MI Success
-glmer_success_total <- lme4::glmer(is_valid ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
-                                   data = paper_llm_processed, family = binomial)
-posthoc_success_total <- conditional_posthoc_function(glmer_success_total, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-
-# 2. TPR Success
-glmer_success_tpr <- lme4::glmer(is_valid_tpr ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
-                                 data = paper_llm_processed, family = binomial)
-posthoc_success_tpr <- conditional_posthoc_function(glmer_success_tpr, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-
-# 3. FPR Success
-glmer_success_fpr <- lme4::glmer(is_valid_fpr ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
-                                 data = paper_llm_processed, family = binomial)
-posthoc_success_fpr <- conditional_posthoc_function(glmer_success_fpr, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-```
-
-```{r}
-posthoc_success_total
-
-posthoc_success_tpr
-
-posthoc_success_fpr
-```
-
-
-## Mean performance
-
 ```{r}
 ###! By default the function deletes any combo which includes NAs. This can lead to bias, benefitial for combos with a small amount of kept rows, as my data is not missing at random. Can I still run them like this?
 
-# 4. Total Score Mean
-lmm_mean_total <- lme4::lmer(total_score ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
+lmm_mean_total <- lme4::lmer(tvd_mi_score ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
                              data = paper_llm_processed)
 posthoc_mean_total <- conditional_posthoc_function(lmm_mean_total, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-
-# 5. TPR Score Mean
-lmm_mean_tpr <- lme4::lmer(tpr_avg_tvd_mi_score ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
-                           data = paper_llm_processed)
-posthoc_mean_tpr <- conditional_posthoc_function(lmm_mean_tpr, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-
-# 6. FPR Score Mean
-lmm_mean_fpr <- lme4::lmer(fpr_avg_tvd_mi_score ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
-                           data = paper_llm_processed)
-posthoc_mean_fpr <- conditional_posthoc_function(lmm_mean_fpr, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
 ```
 
 ```{r}
 posthoc_mean_total
-
-posthoc_mean_tpr
-
-posthoc_mean_fpr
 ```
-
-
-## Stability (Mean Absolute Deviation)
-
-```{r}
-# 7. Total Score Stability (MAD)
-lmm_mad_total <- lme4::lmer(abs_dev ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
-                            data = paper_llm_processed)
-posthoc_mad_total <- conditional_posthoc_function(lmm_mad_total, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-
-# 8. TPR Stability (MAD)
-lmm_mad_tpr <- lme4::lmer(tpr_abs_dev ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
-                          data = paper_llm_processed)
-posthoc_mad_tpr <- conditional_posthoc_function(lmm_mad_tpr, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-
-# 9. FPR Stability (MAD)
-lmm_mad_fpr <- lme4::lmer(fpr_abs_dev ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
-                          data = paper_llm_processed)
-posthoc_mad_fpr <- conditional_posthoc_function(lmm_mad_fpr, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-```
-
-```{r}
-posthoc_mad_total
-
-posthoc_mad_tpr
-
-posthoc_mad_fpr
-```
-
 
 # Session info
 
