@@ -1,7 +1,0 @@
-"0",""
-"0","# Configuration count"
-"0","paper_llm_score |> "
-"0","  group_by(model, temperature, reasoning_effort, chain_of_thought, scope) |> "
-"0","  summarize(row_count = n()) |> "
-"0","  filter(row_count != AMOUNT_PAPERS) |>"
-"0","  kable()"
