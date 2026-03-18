@@ -31,7 +31,7 @@ knitr::opts_chunk$set(
 # Dependencies
 
 ```{r}
-working_dir <- "G:/Meine Ablage/Analytic_flexbility_llm_reviews/simulated_data/tvd_mi"
+path <- "G:/Meine Ablage/Analytical_flexibility_llm_reviews/tvd_mi"
 
 paper_llm_score_name <- "tvd_mi_scores_paper_llm_review_1.parquet"
 
@@ -43,29 +43,16 @@ paper_human_name <- "tvd_mi_scores_paper_human_review_2.parquet"
 SKIP_MESSAGE <- "Skipped cause of invalid input"
 TOTAL_FAILURE_MESSAGE = "LLM call failed after multiple retries"
 
-AMOUNT_SETTINGS <- 112 # Set to expected amount of configuration setting
-AMOUNT_PAPERS <- 98 # Set to expected amount of parsed papers
-
-COMBO_COL <- c("paper_id", "model", "temperature", "reasoning_effort", "chain_of_thought", "scope") # Set to expected combo columns
-CONFIG_COL <- c("model", "hyperparameter", "chain_of_thought", "scope") # Set to expected configuration columns
-BASE_SCORE_COLS <- c(
-  "tpr_tvd_mi_score_1", "tpr_tvd_mi_score_2", "tpr_avg_tvd_mi_score",
-  "fpr_tvd_mi_score_1", "fpr_tvd_mi_score_2", "fpr_avg_tvd_mi_score"
-) # Set to expected score columns
-CLEAN_SCORE_COLS <- c(
-  "TPR 1", "TPR 2", "TPR AVG", 
-  "FPR 1", "FPR 2", "FPR AVG"
-) # Set to wanted score labels
-TOTAL_SCORE_COL <- "tvd_mi_score" # Set to created total score column
+COMBO_COL <- c("paper_id", "model", "temperature", "reasoning_effort", "chain_of_thought", "note_taking") # Set to expected combo columns
+CONFIG_COL <- c("model", "hyperparameter", "chain_of_thought", "note_taking") # Set to expected configuration columns
 
 # Bootstrap settings
 NUM_ITERATIONS <- 1000
 CONFIDENCE_LVL <- 0.95
 
 # Posthoc-test settings
-###! Holmes-correction was not possible. Should I switch to bonferroni, Tuckey or try another way to run post-hoc tests?
 ALPHA <- 0.05
-POST_HOC_CORRECTION = "bonferroni"
+POST_HOC_CORRECTION = "holm"
 ```
 
 ```{r, results= 'hide'}
@@ -94,13 +81,13 @@ load_pkg("ggtext")
 # Load data
 
 ```{r}
-full_path_paper_llm <- file.path(working_dir, paper_llm_score_name)
+full_path_paper_llm <- file.path(path, paper_llm_score_name)
 
 
 paper_llm_score <- read_parquet(full_path_paper_llm,
                                 as_data_frame = TRUE, mmap = TRUE)
 
-full_path_paper_human <- file.path(working_dir, paper_human_name)
+full_path_paper_human <- file.path(path, paper_human_name)
 
 paper_human_score <- read_parquet(full_path_paper_human,
                                   as_data_frame = TRUE, mmap = TRUE)
@@ -108,7 +95,7 @@ paper_human_score <- read_parquet(full_path_paper_human,
 
 # Content checks
 
-As multiple runs of APIs possibly created duplicate paper/configuration pairs, these have to be cleaned first. Besides that, the function creates metadata-columns which indicate weather combinations of paper and configuration have been attempted, and weather they yielded valid TPRs and FPRs in that case.
+The function creates metadata-columns which indicate weather combinations of paper and configuration have been attempted to be judged by the TVD-MI, and weather they yielded valid TPRs and FPRs in that case.
 
 ```{r}
 # Helper function to clean duplicates with granular success flags
@@ -121,31 +108,34 @@ clean_duplicates_function <- function(df,
   
   df_cleaned <- df |>
     mutate(
-      # Individual validity for the sub-metrics
-      is_valid_tpr = !(.data[[tpr_col]] %in% c(skip_msg, fail_msg)),
-      is_valid_fpr = !(.data[[fpr_col]] %in% c(skip_msg, fail_msg)),
-      
-      # The TVD-MI is only valid if BOTH are valid (Success of the TVD-MI score)
-      is_valid = is_valid_tpr & is_valid_fpr,
-      
-      # Fail and skip flags for the compelete tier list
-      is_failed  = (.data[[tpr_col]] %in% fail_msg | .data[[fpr_col]] %in% fail_msg),
-      is_skipped = (.data[[tpr_col]] %in% skip_msg & .data[[fpr_col]] %in% skip_msg),
+      # Create helper columns
+      is_tpr_skip = .data[[tpr_col]] == skip_msg,
+      is_fpr_skip = .data[[fpr_col]] == skip_msg,
+      is_tpr_fail = .data[[tpr_col]] == fail_msg,
+      is_fpr_fail = .data[[fpr_col]] == fail_msg,
+      is_tpr_valid = !(.data[[tpr_col]] %in% c(skip_msg, fail_msg)),
+      is_fpr_valid = !(.data[[fpr_col]] %in% c(skip_msg, fail_msg))
     ) |>
     mutate(
+      # Assign quality tiers for prioritizing
       quality_tier = case_when(
-        is_valid   ~ 1, # Both TPR and FPR are clean
-        is_failed  ~ 2, # Judge error
-        is_skipped ~ 3, # Review generation error
-        TRUE       ~ 4
+        is_tpr_valid & is_fpr_valid ~ 1,
+        (is_tpr_fail & is_fpr_valid) | (is_fpr_fail & is_tpr_valid) ~ 2,
+        is_tpr_fail & is_fpr_fail ~ 3,
+        (is_tpr_skip & is_fpr_valid) | (is_fpr_skip & is_tpr_valid) ~ 4,
+        (is_tpr_skip & is_fpr_fail) | (is_fpr_skip & is_tpr_fail) ~ 5,
+        is_tpr_skip & is_fpr_skip ~ 6,
+        TRUE ~ 7
       ),
       .orig_idx = row_number()
     ) |>
+    # Select highest tier for each paper-configuration combo
     group_by(pick(all_of(combo_cols))) |>
     arrange(quality_tier, .orig_idx, .by_group = TRUE) |>
     slice(1) |>
     ungroup() |>
-    dplyr::select(-any_of(c(".orig_idx")))
+    # Drop helper columns
+    dplyr::select(-any_of(c(".orig_idx", "is_tpr_skip", "is_fpr_skip", "is_tpr_fail", "is_fpr_fail", "is_tpr_valid", "is_fpr_valid")))
   
   return(df_cleaned)
 }
@@ -165,72 +155,58 @@ paper_human_score_cld <- clean_duplicates_function(paper_human_score,
 
 # Completness checks
 
-Incomplete or frequently skipped/invalid combinations papers, configurations and combinations are not dropped, but in case the following indicates odd results these will be taken into consideration in the result interpretation. ###! Is it OK to do that or should I also define a exclusion criteria when I write such code?
+Incomplete or frequently skipped/invalid combinations papers, configurations and combinations are not dropped, but in case the following indicates odd results these will be taken into consideration in the result interpretation.
 
 ## LLM-authored reviews
-
-### Any incomplete processed papers?
-
-```{r}
-paper_llm_score_cld |> 
-  count(`Paper ID` = paper_id) |> 
-  filter(n != AMOUNT_SETTINGS) |> 
-  rename(`Amount of processed configurations` = n) |> 
-  kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) |> 
-  scroll_box(width = "100%", height = "400px")
-```
-
-### Any incompletely proccessed configurations?
-
-```{r}
-paper_llm_score_cld |> 
-  group_by(Model = model, Temperature = temperature, `Reasoning effort` = reasoning_effort,
-           CoT = chain_of_thought, `Scope` = scope, ) |> 
-  summarize(row_count = n(),
-            .groups = "drop") |> 
-  filter(row_count != AMOUNT_PAPERS) |>
-  rename(`Amount of processed papers` = row_count) |> 
-  kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) |> 
-  scroll_box(width = "100%", height = "400px")
-```
 
 ### Status summary global:
 
 ```{r}
-# Global
 paper_llm_score_cld |>
   summarize(
-    `Total amount of combinations` = n(),
-    `Amount of valid results` = sum(is_valid),
-    `Amount of failed results`  = sum(is_failed),
-    `Amount of skipped results` = sum(is_skipped),
+    `Total Combinations` = n(),
+    `Both Valid (Full Success)` = sum(quality_tier == 1),
+    `Valid + Fail` = sum(quality_tier == 2),
+    `Both Fail` = sum(quality_tier == 3),
+    `Valid + Skip` = sum(quality_tier == 4),
+    `Fail + Skip` = sum(quality_tier == 5),
+    `Both Skip` = sum(quality_tier == 6),
     .groups = "drop"
   ) |>
-  mutate(`Success rate`= paste0(round((`Amount of valid results` / `Total amount of combinations`) * 100, 1), "%")) |>
+  mutate(
+    `Success rate` = paste0(round((`Both Valid (Full Success)` / `Total Combinations`) * 100, 1), "%")
+  ) |>
   kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
-                full_width = F) 
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = F
+  )
 ```
 
 ### Status Summary by configuration:
 
 ```{r}
 paper_llm_score_cld |>
-  group_by(model, temperature, reasoning_effort, chain_of_thought, scope) |>
+  group_by(model, temperature, reasoning_effort, chain_of_thought, note_taking) |>
   summarize(
     `Total amount of papers` = n(),
-    `Amount of valid results` = sum(is_valid),
-    `Amount of failed results`  = sum(is_failed),
-    `Amount of skipped results` = sum(is_skipped),
+    `Both Valid (Full Success)` = sum(quality_tier == 1),
+    `Valid + Fail` = sum(quality_tier == 2),
+    `Both Fail` = sum(quality_tier == 3),
+    `Valid + Skip` = sum(quality_tier == 4),
+    `Fail + Skip` = sum(quality_tier == 5),
+    `Both Skip` = sum(quality_tier == 6),
     .groups = "drop"
   ) |>
-  mutate(`Success rate` = paste0(round((`Amount of valid results` / `Total amount of papers`) * 100, 1), "%")) |>
-  arrange(`Success rate`) |> 
+  mutate(
+    `Success rate` = paste0(round((`Both Valid (Full Success)` / `Total amount of papers`) * 100, 1), "%")
+  ) |>
+  arrange(desc(`Both Valid (Full Success)` / `Total amount of papers`)) |> 
   kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-                full_width = F) |> 
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = F
+  ) |> 
   scroll_box(width = "100%", height = "400px")
 ```
 
@@ -241,32 +217,27 @@ paper_llm_score_cld |>
   group_by(`Paper ID` = paper_id) |>
   summarize(
     `Total amount of configurations` = n(),
-    `Amount of valid results` = sum(is_valid),
-    `Amount of failed results`  = sum(is_failed),
-    `Amount of skipped results` = sum(is_skipped),
+    `Both Valid (Full Success)` = sum(quality_tier == 1),
+    `Valid + Fail` = sum(quality_tier == 2),
+    `Both Fail` = sum(quality_tier == 3),
+    `Valid + Skip` = sum(quality_tier == 4),
+    `Fail + Skip` = sum(quality_tier == 5),
+    `Both Skip` = sum(quality_tier == 6),
     .groups = "drop"
   ) |>
-  mutate(`Success rate` = paste0(round((`Amount of valid results` / `Total amount of configurations`) * 100, 1), "%")) |>
-  arrange(`Success rate`) |> 
+  mutate(
+    `Success rate` = paste0(round((`Both Valid (Full Success)` / `Total amount of configurations`) * 100, 1), "%")
+  ) |>
+  arrange(desc(`Both Valid (Full Success)` / `Total amount of configurations`)) |> 
   kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-                full_width = F) |> 
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = F
+  ) |> 
   scroll_box(width = "100%", height = "400px")
 ```
 
 ## Human-authored reviews
-
-### Any not processed papers?
-
-```{r}
-paper_human_score_cld |> 
-  count(`Paper ID` = paper_id) |> 
-  rename(`Amount` = n) |> 
-  filter(`Amount` != 1) |> 
-  kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) |> 
-  scroll_box(width = "100%", height = "400px")
-```
 
 ### Status summary by paper:
 
@@ -274,13 +245,24 @@ paper_human_score_cld |>
 paper_human_score_cld |>
   group_by(`Paper ID` = paper_id) |>
   summarize(
-    `Valid result` = sum(is_valid),
-    `Failed result`  = sum(is_failed),
+    `Total amount of configurations` = n(),
+    `Both Valid (Full Success)` = sum(quality_tier == 1),
+    `Valid + Fail` = sum(quality_tier == 2),
+    `Both Fail` = sum(quality_tier == 3),
+    `Valid + Skip` = sum(quality_tier == 4),
+    `Fail + Skip` = sum(quality_tier == 5),
+    `Both Skip` = sum(quality_tier == 6),
     .groups = "drop"
   ) |>
-  arrange(`Failed result`, `Valid result`) |>
+  mutate(
+    `Success rate` = paste0(round((`Both Valid (Full Success)` / `Total amount of configurations`) * 100, 1), "%")
+  ) |>
+  arrange(desc(`Both Valid (Full Success)` / `Total amount of configurations`)) |> 
   kable(format = "html", align = "r") |>
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) |> 
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = F
+  ) |> 
   scroll_box(width = "100%", height = "400px")
 ```
 
@@ -323,7 +305,7 @@ paper_llm_processed <- paper_llm_score_cld |>
       "o3-mini-2025-01-31" ~ "o3 Mini",
       "gpt-3.5-turbo-0125" ~ "GPT-3.5 Turbo",
       "llama-3.3-70b-versatile" ~ "Llama 3.3 (70B)",
-      "deepseek-r1-distill-llama-70b" ~ "DeepSeek R1 (Llama 70B)",
+      "gemini-3-flash-preview" ~ "Gemini-3 Flash",
       .default = model
     ),
     hyperparameter = case_when(
@@ -337,16 +319,15 @@ paper_llm_processed <- paper_llm_score_cld |>
       NA ~ "False",
       .default = chain_of_thought
     ),
-    scope = case_match(
-      scope,
-      "full_text" ~ "Full text",
-      "abstract"  ~ "Abstract only",
-      .default = scope
+    note_taking = case_match(
+      note_taking,
+      "No" ~ "Active",
+      "Yes" ~ "Not active",
+      .default = note_taking
     )
   ) |> 
   mutate(
     tvd_mi_score = (tpr_avg_tvd_mi_score - fpr_avg_tvd_mi_score),
-    is_created = (1 - is_skipped)
     ) |> 
   unite("temp_config_str", all_of(CONFIG_COL), sep = "_", remove = FALSE) |> 
   mutate(
@@ -390,7 +371,7 @@ summary_table <- paper_llm_processed |>
 
 ## Bootstraping
 
-The bootstrap randomly selects 1000 values with replacing for the given metric and averages across all these values. This process is done for each configuration group. Total scores are ignored. Values at the alpha level / 2 are extracted as lower and upper bounds.
+The bootstrap creates 1000 independent possible score distributions per configuration group for the success metric and the TVD-MI metric. Values at half the alpha level are extracted as lower and upper bounds.
 
 ```{r}
 # Configuration
@@ -475,14 +456,14 @@ paper_llm_processed_bind <- paper_llm_processed |>
 
 ## Plot preparation
 
-For the specification curve plots some the configuration columns are formated.
+For the specification curve plots the configuration columns are formated.
 
 ```{r}
 data_plot <- paper_llm_processed_bind |> 
   mutate(
     model = fct_relevel(
       as.factor(model),
-      "DeepSeek R1 (Llama 70B)", "Llama 3.3 (70B)", "GPT-3.5 Turbo", "o3 Mini", 
+      "Gemini-3-Flash", "Llama 3.3 (70B)", "GPT-3.5 Turbo", "o3 Mini", 
       "o4 Mini", "GPT-4o Mini", "GPT-4o", "GPT-5 Nano", "GPT-5 Mini"
     ),
     hyperparameter = fct_relevel(
@@ -493,82 +474,22 @@ data_plot <- paper_llm_processed_bind |>
       as.factor(chain_of_thought),
       "True", "False"
     ),
-    scope = fct_relevel(
-      as.factor(scope),
-      "Full text", "Abstract only"
+    note_taking = fct_relevel(
+      as.factor(note_taking),
+      "Active", "Not active"
     )
   ) |> 
   rename(
     `Model` = model,
     `Hyper-<br> parameter` = hyperparameter,
     `CoT<br> used` = chain_of_thought,
-    `Scope` = scope
+    `Notes` = note_taking
   )
 ```
 
 # Plots
 
-## Functions
-
-### Distribution plot
-
-```{r}
-bar_function <- function(dataset, 
-                         base_cols, 
-                         total_col,
-                         clean_labels, 
-                         suffix = "", 
-                         plot_title = "Distribution of Score Metrics",
-                         plot_subtitle = "TPR = True positive rate; FPR = False positive rate; AVG = Average") {
-  
-  # Combine user-defined components with the specific total score column
-  all_target_cols <- c(base_cols, total_col)
-  suffixed_cols   <- paste0(all_target_cols, suffix)
-  
-  # Create labels: User labels for components + Automatic suffix for the total column
-  final_labels <- c(
-    clean_labels, 
-    paste0("Total Score ", ifelse(suffix == "_human", "Human", "LLM"))
-  )
-  
-  # Build the plot
-  bar_plot <- dataset |> 
-    dplyr::select(all_of(suffixed_cols)) |> 
-    tidyr::pivot_longer(
-      cols = everything(),
-      names_to = "score_type",
-      values_to = "score_value"
-    ) |> 
-    mutate(
-      # Map the actual column names (with suffixes) to our clean labels
-      score_type = factor(score_type, levels = suffixed_cols, labels = final_labels),
-      # Discrete factor for the -1 to 1 scale
-      score_value = factor(score_value, levels = seq(-1, 1, 0.125))
-    ) |> 
-    ggplot(aes(x = score_value)) +
-    geom_bar(alpha = 0.8, color = "black", fill = "grey70") + 
-    # scale_x_discrete ensures even empty bins are shown to represent the full range
-    scale_x_discrete(drop = FALSE, breaks = as.character(seq(-1, 1, 0.5))) +
-    facet_wrap(~score_type, scales = "free_x") +
-    theme_minimal() +
-    labs(
-      title = plot_title,
-      subtitle = plot_subtitle,
-      x = "Score Value",
-      y = "Count"
-    ) +
-    theme(
-      legend.position = "none",
-      strip.text = element_text(face = "bold"),
-      panel.grid.minor = element_blank(),
-      panel.grid.major.x = element_blank()
-    )
-  
-  return(bar_plot)
-}
-```
-
-### Specification curve plot
+## Function
 
 The plot function for a specification curve is taken from [@cumminsThreatAnalyticFlexibility2025]:
 
@@ -914,39 +835,9 @@ specification_curve_plot_with_shading <- function(data,
 }
 ```
 
-## Distribution llm scores
-
-This plot does not have any inference criteria. The only purpose of this plot is to see how scores are distributed generally.
-
-```{r}
-###! If I have no inference for this plot, should I even include them?
-paper_llm_scores <- bar_function(
-  dataset      = paper_llm_processed,
-  base_cols    = BASE_SCORE_COLS,
-  total_col    = TOTAL_SCORE_COL,
-  clean_labels = CLEAN_SCORE_COLS
-)
-
-paper_llm_scores
-```
-
-## Distribution human scores
-
-This plot does not have any inference criteria. The only purpose of this plot is to see how scores are distributed generally.
-
-```{r}
-paper_human_scores <- bar_function(
-  dataset      = paper_human_processed,
-  base_cols    = BASE_SCORE_COLS,
-  total_col    = TOTAL_SCORE_COL,
-  clean_labels = CLEAN_SCORE_COLS,
-  suffix = "_human",
-)
-
-paper_human_scores
-```
-
 ## Success rate
+
+This plot shows for how many papers in a given parameter combination the review generation was successful.
 
 ```{r}
 success_spec_plot <- data_plot |>  
@@ -955,13 +846,13 @@ success_spec_plot <- data_plot |>
     `Model`, 
     `Hyper-<br> parameter`, 
     `CoT<br> used`, 
-    `Scope`, 
+    `Notes`,
     success_rate,
     boot_success_lower,      
     boot_success_upper
   ) |>  
   # Summarize
-  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Scope) |>
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
     success_rate = mean(success_rate),
     boot_success_lower = mean(boot_success_lower),
@@ -973,9 +864,8 @@ success_spec_plot <- data_plot |>
   # Plot call
   specification_curve_plot_with_shading(
   outcome = success_rate,
-  outcome_name = "Success rate TVD-MI",
-  outcome_cutoff = 1.0,
-  plot_title = "Specification Curve: Success rate by Configuration",
+  outcome_name = "Mean success rate",
+  plot_title = "Mean success rate by configuration",
   interval_lower = "boot_success_lower",
   interval_upper = "boot_success_upper",
   rank_by = rank,
@@ -984,38 +874,40 @@ success_spec_plot <- data_plot |>
     list(top + coord_cartesian(ylim = c(0, 1)))
   }
 )
-```
 
-This plot shows for how many papers in a given parameter combination the review generation was successful.
-
-```{r}
 success_spec_plot
+
+ggsave(
+  filename = "output/success_spec_plot.png", 
+  plot = success_spec_plot, 
+  width = 10, 
+  height = 8, 
+  dpi = 300
+)
 ```
 
 ## Mean
 
-```{r}
-###! The quality assessment ignores how many unsuccessful combos a configuration had. I have included this information via the transparency of the data point (alpha). Should I keep or drop this?
+This plot indicates the average quality of LLM-authored reviews (as indicated by the TVD-MI score) for each parameter combination. Note that this plot does not consider for how many of the papers a parameter combination yielded a successful review generation in the first place.
 
+```{r}
 mean_spec_plot <- data_plot |> 
   # Preprocess
   dplyr::select(
     `Model`, 
     `Hyper-<br> parameter`, 
     `CoT<br> used`, 
-    `Scope`, 
+    `Notes`,
     group_mean,
-    success_rate,
     boot_mean_lower, 
     boot_mean_upper,
     boot_mean_lower_human, 
     boot_mean_upper_human
   ) |> 
   # Summarize
-  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Scope) |> 
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |> 
   summarize(
-    group_mean = mean(group_mean),
-    success_rate = mean(success_rate),
+    group_mean = mean(group_mean),,
     boot_mean_lower = mean(boot_mean_lower),
     boot_mean_upper = mean(boot_mean_upper),
     boot_mean_lower_human = mean(boot_mean_lower_human),
@@ -1029,10 +921,9 @@ mean_spec_plot <- data_plot |>
     # Basic content
     outcome = group_mean,
     outcome_name = "Mean TVD-MI score",
-    plot_title = "Specification Curve: Mean by Configuration",
+    plot_title = "Mean TVD-MI score by Configuration",
     interval_lower = "boot_mean_lower",
     interval_upper = "boot_mean_upper",
-    is_processed = success_rate,
     rank_by = rank,
     # CI base
     shade_lower = "boot_mean_lower_human",
@@ -1042,15 +933,21 @@ mean_spec_plot <- data_plot |>
       list(top + coord_cartesian(ylim = c(-1, 1)))
     }
   )
-```
 
-This plot indicates the average quality of LLM-authored reviews for each parameter combination. Note that this plot does not consider for how many of the papers the parameter combination yielded a review in the first place.
-
-```{r}
 mean_spec_plot
+
+ggsave(
+  filename = "output/mean_spec_plot.png", 
+  plot = mean_spec_plot, 
+  width = 10, 
+  height = 8, 
+  dpi = 300
+)
 ```
 
 # Inferential tests
+
+The linear mixed model tests for significant differences between factor levels, e.g. the different models, in their final TVD-MI score. Note that, once again, the analysis does not consider for how many of the papers the review generation was successful. In case a factor has significant differences across its levels, a post-hoc tests investigates the level orders.
 
 ```{r}
 # Function for conditional posthoc tests
@@ -1074,7 +971,7 @@ conditional_posthoc_function <- function(model, alpha = 0.05, adjust = "bonferro
   
   # Handle cases where no terms are significant
   sig_mask <- anova_res[[p_col]] < alpha
-  terms <- rownames(anova_res)[sig_mask]
+  terms <- rownames(anova_res)
   terms <- terms[!terms %in% c("(Intercept)", "Residuals")]
   
   if(length(terms) == 0) {
@@ -1106,9 +1003,7 @@ conditional_posthoc_function <- function(model, alpha = 0.05, adjust = "bonferro
 ```
 
 ```{r}
-###! By default the function deletes any combo which includes NAs. This can lead to bias, benefitial for combos with a small amount of kept rows, as my data is not missing at random. Can I still run them like this?
-
-lmm_mean_total <- lme4::lmer(tvd_mi_score ~ model + hyperparameter + chain_of_thought + scope + (1 | paper_id),
+lmm_mean_total <- lme4::lmer(tvd_mi_score ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
                              data = paper_llm_processed)
 posthoc_mean_total <- conditional_posthoc_function(lmm_mean_total, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
 ```
