@@ -21,479 +21,352 @@ execute:
   message: false
 ---
 
-```{r setup, include = FALSE}
+```{r}
+#| label: setup
+#| include: false
+
+# Plot settings
+PLOT_WIDTH <- 10
+PLOT_HEIGHT <- 8
+PLOT_DPI <- 300
+
 knitr::opts_chunk$set(
-  warning = FALSE,
-  message = FALSE
+  # Show everything
+  warning = TRUE,
+  message = TRUE,
+  echo = TRUE,
+  
+  # Plot aesthetics
+  dpi = PLOT_DPI,
+  fig.width = PLOT_WIDTH,
+  fig.height = PLOT_HEIGHT,
+  
+  # Output handling
+  results = "hold",
+  tidy = 'styler'
 )
 ```
 
 # Dependencies
 
 ```{r}
-path <- "G:/Meine Ablage/Analytical_flexibility_llm_reviews/tvd_mi"
+#| label: dependencies
+#| message: false
+#| warning: false
 
-paper_llm_score_name <- "tvd_mi_scores_paper_llm_review_1.parquet"
+# Path
+path <- "G:/Meine Ablage/Analytical_flexibility_llm_reviews/llm_reviews/parsed"
 
-paper_human_name <- "tvd_mi_scores_paper_human_review_2.parquet"
-```
+# File name
+llm_reviews <- "results.parquet"
 
-```{r}
-# Flags for skipped or invalid API responses
-SKIP_MESSAGE <- "Skipped cause of invalid input"
-TOTAL_FAILURE_MESSAGE = "LLM call failed after multiple retries"
+# Necessary packages
+needed_packages <- c(
+  "arrow",
+  "tidyverse",
+  "lme4",
+  "car",
+  "emmeans",
+  "multcomp",
+  "multcompView",
+  "broom.mixed",
+  "knitr",
+  "kableExtra",
+  "cowplot",
+  "ggtext",
+  "rlang",
+  "styler",
+  "grid"
+)
 
-COMBO_COL <- c("paper_id", "model", "temperature", "reasoning_effort", "chain_of_thought", "note_taking") # Set to expected combo columns
-CONFIG_COL <- c("model", "hyperparameter", "chain_of_thought", "note_taking") # Set to expected configuration columns
-
-# Bootstrap settings
-NUM_ITERATIONS <- 1000
-CONFIDENCE_LVL <- 0.95
-
-# Posthoc-test settings
-ALPHA <- 0.05
-POST_HOC_CORRECTION = "holm"
-```
-
-```{r, results= 'hide'}
+# Helper function for package installation
+#' Conditional Package Loader and Installer
+#'
+#' Checks for the presence of a specified R package. If the package is not 
+#' already installed, it downloads and installs it from CRAN along with 
+#' any required dependencies. Finally, it loads the package into the namespace.
+#'
+#' @param pkg A character string representing the name of the package to be loaded.
+#'
+#' @return None. This function is used for the side effect of loading and 
+#'   potentially installing a library.
 load_pkg <- function(pkg) {
-  if (!require(pkg, character.only = TRUE)) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
     install.packages(pkg, dependencies = TRUE)
     library(pkg, character.only = TRUE)
   }
 }
 
-load_pkg("arrow")
-load_pkg("tidyverse")
-load_pkg("lme4")
-load_pkg("car")
-load_pkg("emmeans")
-load_pkg("multcomp")
-load_pkg("multcompView")
-load_pkg("broom.mixed")
-load_pkg("transport")
-load_pkg("knitr")
-load_pkg("kableExtra")
-load_pkg("cowplot")
-load_pkg("ggtext")
+# Execution of helper function
+invisible(lapply(needed_packages, load_pkg))
 ```
 
-# Load data
+# Hardcoded values
 
 ```{r}
-full_path_paper_llm <- file.path(path, paper_llm_score_name)
+#| label: hardcoded values
+
+# Error flags
+REVIEW_GENERATION_FAILURE = "ERROR: REVIEW GENERATION NOT SUCCESSFUL"
+PARALLEL_PROCESSING_FAILURE = "ERROR: UNKNOWN STATE REACHED IN PARALLEL PROCESSING"
+EXTRACTION_FAILURE = "ERROR: SEGMENT EXTRACTION FAILED"
+JUDGE_GENERATION_FAILURE = "ERROR: FAILED TO GENERATE JUDGEMENT"
+JUDGE_CLIENT_FAILURE = "ERROR: UNKNOWN CLIENT ERROR"
+EXTRACTION_FAILURE_II = "ERROR: FAILED TO EXTRACT JSON FROM RAW JUDGEMENT"
+PARSING_FAILURE = "ERROR: FAILED TO PARSE JSON JUDGEMENT"
+
+# Column names
+CONFIG_COL <- c("model", "hyperparameter", "chain_of_thought", "note_taking", "config_group")
+COMBO_COL <- c("paper_id", CONFIG_COL)
+INTERNAL_SCORE_COL <- c("correctness_rating", "technical_novelty_significance_rating", "empirical_novelty_significance_rating")
+EXTERNAL_SCORE_COL <- c("actionability_label", "grounding_specificity_label", "verifiability_label", "helpfulness_label")
+
+# Bootstrap settings
+NUM_ITERATIONS <- 100
+CONFIDENCE_LVL <- 0.95
+
+# Posthoc tests settings
+ALPHA <- 0.05
+POST_HOC_CORRECTION_TYPE = "holm"
+```
+
+# Data loading
+
+```{r}
+#| label: data import
+
+full_path_llm_reviews <- file.path(path, llm_reviews)
 
 
-paper_llm_score <- read_parquet(full_path_paper_llm,
+review_data <- read_parquet(full_path_llm_reviews,
                                 as_data_frame = TRUE, mmap = TRUE)
-
-full_path_paper_human <- file.path(path, paper_human_name)
-
-paper_human_score <- read_parquet(full_path_paper_human,
-                                  as_data_frame = TRUE, mmap = TRUE)
 ```
 
-# Content checks
+# Data processing
 
-The function creates metadata-columns which indicate weather combinations of paper and configuration have been attempted to be judged by the TVD-MI, and weather they yielded valid TPRs and FPRs in that case.
+## Content check
 
 ```{r}
-# Helper function to clean duplicates with granular success flags
-clean_duplicates_function <- function(df, 
-                                      combo_cols, 
-                                      tpr_col, 
-                                      fpr_col, 
-                                      skip_msg = SKIP_MESSAGE, 
-                                      fail_msg = TOTAL_FAILURE_MESSAGE) {
-  
-  df_cleaned <- df |>
-    mutate(
-      # Create helper columns
-      is_tpr_skip = .data[[tpr_col]] == skip_msg,
-      is_fpr_skip = .data[[fpr_col]] == skip_msg,
-      is_tpr_fail = .data[[tpr_col]] == fail_msg,
-      is_fpr_fail = .data[[fpr_col]] == fail_msg,
-      is_tpr_valid = !(.data[[tpr_col]] %in% c(skip_msg, fail_msg)),
-      is_fpr_valid = !(.data[[fpr_col]] %in% c(skip_msg, fail_msg))
-    ) |>
-    mutate(
-      # Assign quality tiers for prioritizing
-      quality_tier = case_when(
-        is_tpr_valid & is_fpr_valid ~ 1,
-        (is_tpr_fail & is_fpr_valid) | (is_fpr_fail & is_tpr_valid) ~ 2,
-        is_tpr_fail & is_fpr_fail ~ 3,
-        (is_tpr_skip & is_fpr_valid) | (is_fpr_skip & is_tpr_valid) ~ 4,
-        (is_tpr_skip & is_fpr_fail) | (is_fpr_skip & is_tpr_fail) ~ 5,
-        is_tpr_skip & is_fpr_skip ~ 6,
-        TRUE ~ 7
-      ),
-      .orig_idx = row_number()
-    ) |>
-    # Select highest tier for each paper-configuration combo
-    group_by(pick(all_of(combo_cols))) |>
-    arrange(quality_tier, .orig_idx, .by_group = TRUE) |>
-    slice(1) |>
-    ungroup() |>
-    # Drop helper columns
-    dplyr::select(-any_of(c(".orig_idx", "is_tpr_skip", "is_fpr_skip", "is_tpr_fail", "is_fpr_fail", "is_tpr_valid", "is_fpr_valid")))
-  
-  return(df_cleaned)
+#| label: tier function
+
+# Define tier ranking logic
+#' Assign Tier Ranking to Review Outcomes
+#'
+#' Categorizes the success or failure type of a review process into a numerical 
+#' rank (1–7). This ranking is typically used to filter data or to determine 
+#' the furthest point reached in the analysis pipeline for each observation.
+#'
+#' @param x A character or numeric value representing the outcome of a review 
+#'   or extraction step (e.g., a score, a failure constant, or "X").
+#'
+#' @return An integer from 1 to 7, where:
+#'   \itemize{
+#'     \item \strong{1}: Success (Valid score 1-5 or placeholder "X").
+#'     \item \strong{2-3}: Extraction/Parsing issues (Partial success).
+#'     \item \strong{4}: Judge-related failures (Review exists, but wasn't graded).
+#'     \item \strong{5-6}: Critical failures (Review generation or processing failed).
+#'     \item \strong{7}: Unknown or uncategorized outcomes.
+#'   }
+get_val_rank <- function(x) {
+  case_when(
+    x == "X" | x %in% as.character(1:5) | x %in% 1:5 ~ 1,
+    x == PARSING_FAILURE                           ~ 2,
+    x == EXTRACTION_FAILURE_II                     ~ 3,
+    x == JUDGE_GENERATION_FAILURE                  ~ 4,
+    x == JUDGE_CLIENT_FAILURE                      ~ 4, # must be reached to count review generation as success
+    x == EXTRACTION_FAILURE                        ~ 5,
+    x == REVIEW_GENERATION_FAILURE                 ~ 6,
+    x == PARALLEL_PROCESSING_FAILURE               ~ 6,
+    TRUE ~ 7
+  )
 }
 ```
 
 ```{r}
-paper_llm_score_cld <- clean_duplicates_function(paper_llm_score,
-                                                 COMBO_COL,
-                                                 "tpr_avg_tvd_mi_score",
-                                                 "fpr_avg_tvd_mi_score")
+#| label: tier ranking
 
-paper_human_score_cld <- clean_duplicates_function(paper_human_score,
-                                                  "paper_id",
-                                                  "tpr_avg_tvd_mi_score",
-                                                  "fpr_avg_tvd_mi_score")
+# Assign tier ranks
+review_data_tiered <- review_data |>
+  rowwise() |>
+  mutate(
+    segment_tier = max(c_across(all_of(EXTERNAL_SCORE_COL)) |> map_dbl(get_val_rank))
+  )  |> 
+  ungroup()
 ```
 
-# Completness checks
-
-Incomplete or frequently skipped/invalid combinations papers, configurations and combinations are not dropped, but in case the following indicates odd results these will be taken into consideration in the result interpretation.
-
-## LLM-authored reviews
-
-### Status summary global:
+## Transformation and calculation
 
 ```{r}
-paper_llm_score_cld |>
-  summarize(
-    `Total Combinations` = n(),
-    `Both Valid (Full Success)` = sum(quality_tier == 1),
-    `Valid + Fail` = sum(quality_tier == 2),
-    `Both Fail` = sum(quality_tier == 3),
-    `Valid + Skip` = sum(quality_tier == 4),
-    `Fail + Skip` = sum(quality_tier == 5),
-    `Both Skip` = sum(quality_tier == 6),
-    .groups = "drop"
-  ) |>
+#| label: score transformation and calculation
+
+review_data_calculated <- review_data_tiered |> 
+  # Factorize ID columns
   mutate(
-    `Success rate` = paste0(round((`Both Valid (Full Success)` / `Total Combinations`) * 100, 1), "%")
-  ) |>
-  kable(format = "html", align = "r") |>
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed"),
-    full_width = F
-  )
-```
-
-### Status Summary by configuration:
-
-```{r}
-paper_llm_score_cld |>
-  group_by(model, temperature, reasoning_effort, chain_of_thought, note_taking) |>
-  summarize(
-    `Total amount of papers` = n(),
-    `Both Valid (Full Success)` = sum(quality_tier == 1),
-    `Valid + Fail` = sum(quality_tier == 2),
-    `Both Fail` = sum(quality_tier == 3),
-    `Valid + Skip` = sum(quality_tier == 4),
-    `Fail + Skip` = sum(quality_tier == 5),
-    `Both Skip` = sum(quality_tier == 6),
-    .groups = "drop"
-  ) |>
+    paper_id = as.factor(paper_id),
+    config_group = as.factor(config_group)
+    ) |>
+  # Reformat configuration columns
   mutate(
-    `Success rate` = paste0(round((`Both Valid (Full Success)` / `Total amount of papers`) * 100, 1), "%")
-  ) |>
-  arrange(desc(`Both Valid (Full Success)` / `Total amount of papers`)) |> 
-  kable(format = "html", align = "r") |>
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-    full_width = F
-  ) |> 
-  scroll_box(width = "100%", height = "400px")
-```
-
-### Status summary by paper:
-
-```{r}
-paper_llm_score_cld |>
-  group_by(`Paper ID` = paper_id) |>
-  summarize(
-    `Total amount of configurations` = n(),
-    `Both Valid (Full Success)` = sum(quality_tier == 1),
-    `Valid + Fail` = sum(quality_tier == 2),
-    `Both Fail` = sum(quality_tier == 3),
-    `Valid + Skip` = sum(quality_tier == 4),
-    `Fail + Skip` = sum(quality_tier == 5),
-    `Both Skip` = sum(quality_tier == 6),
-    .groups = "drop"
-  ) |>
-  mutate(
-    `Success rate` = paste0(round((`Both Valid (Full Success)` / `Total amount of configurations`) * 100, 1), "%")
-  ) |>
-  arrange(desc(`Both Valid (Full Success)` / `Total amount of configurations`)) |> 
-  kable(format = "html", align = "r") |>
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-    full_width = F
-  ) |> 
-  scroll_box(width = "100%", height = "400px")
-```
-
-## Human-authored reviews
-
-### Status summary by paper:
-
-```{r}
-paper_human_score_cld |>
-  group_by(`Paper ID` = paper_id) |>
-  summarize(
-    `Total amount of configurations` = n(),
-    `Both Valid (Full Success)` = sum(quality_tier == 1),
-    `Valid + Fail` = sum(quality_tier == 2),
-    `Both Fail` = sum(quality_tier == 3),
-    `Valid + Skip` = sum(quality_tier == 4),
-    `Fail + Skip` = sum(quality_tier == 5),
-    `Both Skip` = sum(quality_tier == 6),
-    .groups = "drop"
-  ) |>
-  mutate(
-    `Success rate` = paste0(round((`Both Valid (Full Success)` / `Total amount of configurations`) * 100, 1), "%")
-  ) |>
-  arrange(desc(`Both Valid (Full Success)` / `Total amount of configurations`)) |> 
-  kable(format = "html", align = "r") |>
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-    full_width = F
-  ) |> 
-  scroll_box(width = "100%", height = "400px")
-```
-
-# Calculations
-
-## Score transformation and calculations
-
-The `total_score` column contains the final TVD-MI metric. The new column `hyperparameter` combines the information for temperature parameter or reasoning effort parameter. The mean success rate and the mean TVD-MI per configuration group are calculated. For the human data, the success rate is by definition set to 1.
-
-```{r}
-# 1. Human Data Processing (Baseline)
-paper_human_processed <- paper_human_score_cld |> 
-  mutate(paper_id = as.factor(paper_id)) |> 
-  mutate(across(contains("score"), ~ suppressWarnings(as.numeric(.)))) |> 
-  mutate(
-    tvd_mi_score = (tpr_avg_tvd_mi_score - fpr_avg_tvd_mi_score),
-    
-    # Success rates (Metric 1); Human validity is 100% by definition
-    success_rate = 1,
-    
-    # Performance means (Metric 2 and 3)
-    group_mean = if(all(is.na(tvd_mi_score))) NA_real_ else mean(tvd_mi_score, na.rm = TRUE),
-
-  ) |> 
-  rename_with(~ paste0(., "_human"), .cols = -c(paper_id)) |> 
-  mutate(config_label_human = "Human_Global")
-
-# 2. LLM Data Processing (Config-Level)
-paper_llm_processed <- paper_llm_score_cld |> 
-  mutate(paper_id = as.factor(paper_id)) |> 
-  mutate(across(contains("score"), ~ suppressWarnings(as.numeric(.)))) |> 
-  mutate(
-    model = case_match(
+    model = recode_values(
       model,
-      "gpt-5-mini-2025-08-07" ~ "GPT-5 Mini",
-      "gpt-5-nano-2025-08-07" ~ "GPT-5 Nano",
-      "gpt-4o-2024-08-06" ~ "GPT-4o",
-      "gpt-4o-mini-2024-07-18" ~ "GPT-4o Mini",
-      "o4-mini-2025-04-16" ~ "o4 Mini",
-      "o3-mini-2025-01-31" ~ "o3 Mini",
-      "gpt-3.5-turbo-0125" ~ "GPT-3.5 Turbo",
+      "gpt-5-mini-2025-08-07"   ~ "GPT-5 Mini",
+      "gpt-5-nano-2025-08-07"   ~ "GPT-5 Nano",
+      "gpt-4o-2024-11-20"       ~ "GPT-4o",
+      "gpt-4o-mini-2024-07-18"  ~ "GPT-4o Mini",
+      "o4-mini-2025-04-16"      ~ "o4 Mini",
+      "o3-mini-2025-01-31"      ~ "o3 Mini",
+      "gpt-3.5-turbo-0125"      ~ "GPT-3.5 Turbo",
       "llama-3.3-70b-versatile" ~ "Llama 3.3 (70B)",
-      "gemini-3-flash-preview" ~ "Gemini-3 Flash",
-      .default = model
+      "gemini-3-flash-preview"  ~ "Gemini-3 Flash"
     ),
     hyperparameter = case_when(
       !is.na(reasoning_effort) ~ paste0("Re ", reasoning_effort),
       !is.na(temperature) ~ paste0("Tempr ", temperature),
       TRUE ~ "default"
     ),
-    chain_of_thought = case_match(
+    chain_of_thought = recode_values(
       chain_of_thought,
       "Explain your thought process step by step." ~ "True",
-      NA ~ "False",
-      .default = chain_of_thought
-    ),
-    note_taking = case_match(
-      note_taking,
-      "No" ~ "Active",
-      "Yes" ~ "Not active",
-      .default = note_taking
+      "" ~ "False"
     )
   ) |> 
+  # Create new column to distinguish if a comment needed verification in the first place
   mutate(
-    tvd_mi_score = (tpr_avg_tvd_mi_score - fpr_avg_tvd_mi_score),
-    ) |> 
-  unite("temp_config_str", all_of(CONFIG_COL), sep = "_", remove = FALSE) |> 
-  mutate(
-    config_id = as.numeric(factor(temp_config_str, levels = unique(temp_config_str))),
-    config_label = paste0("Config_", config_id)
+    # TRUE = made a claim (1-5), FALSE = did not (X), NA = judge failed
+    is_verifiable_claim = case_when(
+      verifiability_label %in% as.character(1:5) ~ TRUE,
+      verifiability_label == "X" ~ FALSE,
+      TRUE ~ NA # Error strings or unknown states
+    )
   ) |> 
-  dplyr::select(-temp_config_str) |> 
-  group_by(config_label) |> 
-  mutate(
-    # Success rates (Metric 1)
-    success_rate     = mean(is_created, na.rm = TRUE),
-
-    # Performance means (Metric 2)
-    group_mean = if(all(is.na(tvd_mi_score))) NA_real_ else mean(tvd_mi_score, na.rm = TRUE),
-  ) |> 
-  ungroup() |>
-  left_join(paper_human_processed |> 
-              dplyr::select(
-                paper_id,
-                success_rate_human,
-                tvd_mi_score_human,
-                group_mean_human
-              ),
-            by = "paper_id"
+  # Convert all scores to numeric
+  mutate(across(all_of(c(INTERNAL_SCORE_COL, EXTERNAL_SCORE_COL)), ~ suppressWarnings(as.numeric(as.character(.x))))) |> 
+  # Group to unit of analysis (whole reviews)
+  group_by(across(all_of(COMBO_COL))) |>
+  summarise(
+    # Success: All reviews' segments are valid or failed only after review generation and extraction steps)
+    is_success = all(segment_tier <= 4),
+    
+    # Quality: Average "quality" across all of the reviews' segments
+    across(all_of(EXTERNAL_SCORE_COL), ~ mean(.x, na.rm = TRUE)),
+    
+    # Verifiability: Proportion of comments needed to be verified across all of the reviews' segments
+    review_verifiability_rate = mean(is_verifiable_claim, na.rm = TRUE),
+    
+    # Sensitivty: Scores included in a single review
+    across(all_of(INTERNAL_SCORE_COL), ~ mean(.x, na.rm = TRUE)),
+    
+    .groups = "drop"
   )
 
-# 3. Summary table
-summary_table <- paper_llm_processed |> 
-  group_by(config_id) |> 
-  summarize(
-    
-    # Success
-    mean_success_rate     = first(success_rate),
-    
-    # Performance (Mean)
-    mean_score     = first(group_mean),
+# Create summary
+review_data_summary <- review_data_calculated |>
+  group_by(across(all_of(CONFIG_COL))) |>
+  summarise(
+    # Calculate mean per group
+    mean_success       = mean(is_success, na.rm = TRUE),
+    mean_verifiability = mean(review_verifiability_rate, na.rm = TRUE),
+    across(all_of(EXTERNAL_SCORE_COL), ~mean(.x, na.rm = TRUE), .names = "mean_{.col}"),
+    across(all_of(INTERNAL_SCORE_COL), ~mean(.x, na.rm = TRUE), .names = "mean_{.col}"),
     
     .groups = "drop"
   )
 ```
 
-## Bootstraping
-
-The bootstrap creates 1000 independent possible score distributions per configuration group for the success metric and the TVD-MI metric. Values at half the alpha level are extracted as lower and upper bounds.
+## Bootstrap
 
 ```{r}
-# Configuration
-num_iterations <- NUM_ITERATIONS
-confidence_lvl <- CONFIDENCE_LVL
-global_alpha <- (1 - confidence_lvl) / 2
+#| label: bootstrap function
 
-# Helper function
-bootstrap_function <- function(df, 
-                              group_col,
-                              score_col,
-                              is_created_col = NULL, # Optional
-                              iterations = num_iterations, 
-                              alpha = global_alpha,
-                              calc_success = FALSE) {
+# Set alpha level
+global_alpha <- (1 - CONFIDENCE_LVL) / 2
+
+# Define bootstrap function
+#' Bootstrap Confidence Interval Generation
+#'
+#' Performs non-parametric bootstrapping to estimate uncertainty for given metrics
+#'
+#' @param df A data frame containing the review-level data.
+#' @param group_col A character string specifying the column to group by 
+#' @param iterations Integer. The number of bootstrap resamples to perform. 
+#'   Defaults to the global \code{NUM_ITERATIONS}.
+#'
+#' @return A data frame containing the lower and upper confidence bounds. 
+#'   Columns are named using the pattern: 
+#'   \code{boot_[original_metric]_[lower/upper]}
+bootstrap <- function(df, group_col, iterations = NUM_ITERATIONS) {
   
   set.seed(42)
   
+  # Generate the distribution
   boot_distribution <- map_df(1:iterations, function(i) {
     df |> 
+      # Group by configuration
       group_by(.data[[group_col]]) |> 
+      # Sample with replacement
       slice_sample(prop = 1, replace = TRUE) |> 
       summarise(
-        # Plot 1: Success
-        boot_success = if (calc_success) {
-          mean(.data[[is_created_col]], na.rm = TRUE)
-        } else {
-          NA_real_
-        },
+        # Success
+        boot_success_rate = mean(is_success, na.rm = TRUE),
         
-        # Plot 2: Performance
-        boot_mean = mean(.data[[score_col]], na.rm = TRUE),
+        # Quality
+        across(all_of(EXTERNAL_SCORE_COL), 
+               ~mean(.x, na.rm = TRUE),
+               .names = "boot_{.col}"),
+        
+        # Verifiability
+        boot_verifiable_rate = mean(review_verifiability_rate, na.rm = TRUE),
+        
+        # Sensitivity
+        across(all_of(INTERNAL_SCORE_COL), 
+               ~mean(.x, na.rm = TRUE),
+               .names = "boot_{.col}"),
         
         .groups = "drop"
       )
   })
   
-  # Calculate quantiles
+  # Calculate CIs
   ci_results <- boot_distribution |> 
+    # Group by configuration
     group_by(.data[[group_col]]) |> 
     summarise(
       across(starts_with("boot_"), 
-             list(lower = ~quantile(.x, alpha, na.rm = TRUE),
-                  upper = ~quantile(.x, 1 - alpha, na.rm = TRUE)),
+             list(lower = ~quantile(.x, global_alpha, na.rm = TRUE),
+                  upper = ~quantile(.x, 1 - global_alpha, na.rm = TRUE)),
              .names = "{.col}_{.fn}"),
       .groups = "drop"
     )
-  
-  # Delete empty columns
-  if (!calc_success) {
-    ci_results <- ci_results |> dplyr::select(-starts_with("boot_success"))
-  }
   
   return(ci_results)
 }
 ```
 
 ```{r}
-llm_boot_summary <- bootstrap_function(
-  df = paper_llm_processed,
-  group_col = "config_label",
-  score_col = "tvd_mi_score",
-  is_created_col = "is_created",
-  calc_success = TRUE
-)
+#| label: bootstrap
 
-human_boot_summary <- bootstrap_function(
-  df = paper_human_processed,
-  group_col = "config_label_human",
-  score_col = "tvd_mi_score_human",
-)
+# Apply bootstrap function
+boot_results <- bootstrap(review_data_calculated, "config_group")
 ```
 
 ```{r}
-paper_llm_processed_bind <- paper_llm_processed |> 
-  left_join(llm_boot_summary, by = "config_label") |> 
-  cross_join(
-    human_boot_summary |>
-      dplyr::select(-config_label_human) |> 
-      rename_with(~ paste0(.x, "_human")))
+#| label: data join
+
+# Join summary and bootstrap results
+review_data_bootstraped <- review_data_summary |> 
+  left_join(boot_results, "config_group")
 ```
 
-## Plot preparation
 
-For the specification curve plots the configuration columns are formated.
+# Data plotting
 
-```{r}
-data_plot <- paper_llm_processed_bind |> 
-  mutate(
-    model = fct_relevel(
-      as.factor(model),
-      "Gemini-3-Flash", "Llama 3.3 (70B)", "GPT-3.5 Turbo", "o3 Mini", 
-      "o4 Mini", "GPT-4o Mini", "GPT-4o", "GPT-5 Nano", "GPT-5 Mini"
-    ),
-    hyperparameter = fct_relevel(
-      as.factor(hyperparameter),
-      "Tempr 1.5", "Tempr 1", "Tempr 0.5", "Tempr 0", "Re high", "Re low"
-    ),
-    chain_of_thought = fct_relevel(
-      as.factor(chain_of_thought),
-      "True", "False"
-    ),
-    note_taking = fct_relevel(
-      as.factor(note_taking),
-      "Active", "Not active"
-    )
-  ) |> 
-  rename(
-    `Model` = model,
-    `Hyper-<br> parameter` = hyperparameter,
-    `CoT<br> used` = chain_of_thought,
-    `Notes` = note_taking
-  )
-```
+## Specification curve function
 
-# Plots
-
-## Function
-
-The plot function for a specification curve is taken from [@cumminsThreatAnalyticFlexibility2025]:
+The plot function for a specification curve was taken from [@cumminsThreatAnalyticFlexibility2025]:
 
 ```{r}
+#| label: spec curve function
+
 specification_curve_plot_with_shading <- function(data,
                                                   outcome = "outcome",
                                                   outcome_name = "Outcome",
@@ -835,11 +708,46 @@ specification_curve_plot_with_shading <- function(data,
 }
 ```
 
-## Success rate
-
-This plot shows for how many papers in a given parameter combination the review generation was successful.
+## Data preparation
 
 ```{r}
+#| label: plot data prep
+
+data_plot <- review_data_bootstraped |> 
+  mutate(
+    model = fct_relevel(
+      as.factor(model),
+      "Gemini-3 Flash", "Llama 3.3 (70B)", "GPT-3.5 Turbo", "o3 Mini", 
+      "o4 Mini", "GPT-4o Mini", "GPT-4o", "GPT-5 Nano", "GPT-5 Mini"
+    ),
+    hyperparameter = fct_relevel(
+      as.factor(hyperparameter),
+      "Tempr 1.5", "Tempr 1", "Tempr 0.5", "Tempr 0", "Re high", "Re low"
+    ),
+    chain_of_thought = fct_relevel(
+      as.factor(chain_of_thought),
+      "True", "False"
+    ),
+    note_taking = fct_relevel(
+      as.factor(note_taking),
+      "Faithful", "Turned off"
+    )
+  ) |> 
+  rename(
+    `Model` = model,
+    `Hyper-<br> parameter` = hyperparameter,
+    `CoT<br> used` = chain_of_thought,
+    `Notes` = note_taking
+  )
+```
+
+## Success metric
+
+### Specification curve: Succcess rate
+
+```{r}
+#| label: spec curve success rate quality
+
 success_spec_plot <- data_plot |>  
   # Preprocess
   dplyr::select(
@@ -847,16 +755,16 @@ success_spec_plot <- data_plot |>
     `Hyper-<br> parameter`, 
     `CoT<br> used`, 
     `Notes`,
-    success_rate,
-    boot_success_lower,      
-    boot_success_upper
-  ) |>  
+    mean_success,
+    boot_success_rate_lower,      
+    boot_success_rate_upper
+  ) |> 
   # Summarize
   group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
-    success_rate = mean(success_rate),
-    boot_success_lower = mean(boot_success_lower),
-    boot_success_upper = mean(boot_success_upper),
+    success_rate = mean(mean_success),
+    boot_success_lower = mean(boot_success_rate_lower),
+    boot_success_upper = mean(boot_success_rate_upper),
     .groups = "drop"
   ) |> 
   arrange(success_rate) |>
@@ -880,78 +788,434 @@ success_spec_plot
 ggsave(
   filename = "output/success_spec_plot.png", 
   plot = success_spec_plot, 
-  width = 10, 
-  height = 8, 
-  dpi = 300
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
 )
 ```
 
-## Mean
+## Internal metrics
 
-This plot indicates the average quality of LLM-authored reviews (as indicated by the TVD-MI score) for each parameter combination. Note that this plot does not consider for how many of the papers a parameter combination yielded a successful review generation in the first place.
+### Specification curve: Correctness
 
 ```{r}
-mean_spec_plot <- data_plot |> 
+#| label: spec curve correctness
+
+correctness_spec_plot <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
     `Hyper-<br> parameter`, 
     `CoT<br> used`, 
     `Notes`,
-    group_mean,
-    boot_mean_lower, 
-    boot_mean_upper,
-    boot_mean_lower_human, 
-    boot_mean_upper_human
+    mean_correctness_rating,
+    boot_correctness_rating_lower,      
+    boot_correctness_rating_upper,
   ) |> 
   # Summarize
-  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |> 
-  summarize(
-    group_mean = mean(group_mean),,
-    boot_mean_lower = mean(boot_mean_lower),
-    boot_mean_upper = mean(boot_mean_upper),
-    boot_mean_lower_human = mean(boot_mean_lower_human),
-    boot_mean_upper_human = mean(boot_mean_upper_human),
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    correctness = mean(mean_correctness_rating),
+    boot_specificity_lower = mean(boot_correctness_rating_lower),
+    boot_specificity_upper = mean(boot_correctness_rating_upper),
     .groups = "drop"
   ) |> 
-  arrange(group_mean) |>
+  arrange(correctness) |>
   mutate(rank = row_number()) |> 
   # Plot call
   specification_curve_plot_with_shading(
-    # Basic content
-    outcome = group_mean,
-    outcome_name = "Mean TVD-MI score",
-    plot_title = "Mean TVD-MI score by Configuration",
-    interval_lower = "boot_mean_lower",
-    interval_upper = "boot_mean_upper",
-    rank_by = rank,
-    # CI base
-    shade_lower = "boot_mean_lower_human",
-    shade_upper = "boot_mean_upper_human",
-    
-    mutate_plots = \(top, bottom, df) {
-      list(top + coord_cartesian(ylim = c(-1, 1)))
-    }
-  )
+  outcome = correctness,
+  outcome_name = "Mean correctness",
+  plot_title = "Mean internal correctness score by configuration",
+  interval_lower = "boot_specificity_lower",
+  interval_upper = "boot_specificity_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
 
-mean_spec_plot
+correctness_spec_plot
 
 ggsave(
-  filename = "output/mean_spec_plot.png", 
-  plot = mean_spec_plot, 
-  width = 10, 
-  height = 8, 
-  dpi = 300
+  filename = "output/correctness_spec_plot.png", 
+  plot = correctness_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
 )
 ```
 
-# Inferential tests
-
-The linear mixed model tests for significant differences between factor levels, e.g. the different models, in their final TVD-MI score. Note that, once again, the analysis does not consider for how many of the papers the review generation was successful. In case a factor has significant differences across its levels, a post-hoc tests investigates the level orders.
+### Specification curve: Technical novelty
 
 ```{r}
+#| label: spec curve technical novelty
+
+technical_novelty_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_technical_novelty_significance_rating,
+    boot_technical_novelty_significance_rating_lower,      
+    boot_technical_novelty_significance_rating_upper,
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    technical_novelty = mean(mean_technical_novelty_significance_rating),
+    boot_technical_novelty_lower = mean(boot_technical_novelty_significance_rating_lower),
+    boot_technical_novelty_upper = mean(boot_technical_novelty_significance_rating_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(technical_novelty) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = technical_novelty,
+  outcome_name = "Mean technical novelty",
+  plot_title = "Mean internal technical novelty score by configuration",
+  interval_lower = "boot_technical_novelty_lower",
+  interval_upper = "boot_technical_novelty_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+technical_novelty_spec_plot
+
+ggsave(
+  filename = "output/technical_novelty_spec_plot.png", 
+  plot = technical_novelty_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+### Specification curve: Empirical novelty
+
+```{r}
+#| label: spec curve empirical novelty
+
+empirical_novelty_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_empirical_novelty_significance_rating,
+    boot_empirical_novelty_significance_rating_lower,      
+    boot_empirical_novelty_significance_rating_upper,
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    empirical_novelty = mean(mean_empirical_novelty_significance_rating),
+    boot_empirical_novelty_lower = mean(boot_empirical_novelty_significance_rating_lower),
+    boot_empirical_novelty_upper = mean(boot_empirical_novelty_significance_rating_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(empirical_novelty) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = empirical_novelty,
+  outcome_name = "Mean empirical novelty",
+  plot_title = "Mean internal empirical novelty score by configuration",
+  interval_lower = "boot_empirical_novelty_lower",
+  interval_upper = "boot_empirical_novelty_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+empirical_novelty_spec_plot
+
+ggsave(
+  filename = "output/empirical_novelty_spec_plot.png", 
+  plot = empirical_novelty_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+## Quality metrics
+
+### Specification curve: Verification density
+
+```{r}
+#| label: spec curve verifiability density
+
+verifiability_density_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_verifiability,
+    boot_verifiable_rate_lower,      
+    boot_verifiable_rate_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    verifiability = mean(mean_verifiability),
+    boot_verifiability_lower = mean(boot_verifiable_rate_lower),
+    boot_verifiability_upper = mean(boot_verifiable_rate_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(verifiability) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = verifiability,
+  outcome_name = "Mean verifiability rate",
+  plot_title = "Mean verifiability rate by configuration",
+  interval_lower = "boot_verifiability_lower",
+  interval_upper = "boot_verifiability_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 1)))
+  }
+)
+
+verifiability_density_spec_plot
+
+ggsave(
+  filename = "output/verifiability_density_spec_plot.png", 
+  plot = verifiability_density_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+
+### Specification curve: Verification  quality
+
+```{r}
+#| label: spec curve verification quality
+
+verifiability_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_verifiability_label,
+    boot_verifiability_label_lower,      
+    boot_verifiability_label_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    verifiability = mean(mean_verifiability_label),
+    boot_verifiability_lower = mean(boot_verifiability_label_lower),
+    boot_verifiability_upper = mean(boot_verifiability_label_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(verifiability) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = verifiability,
+  outcome_name = "Mean verifiability",
+  plot_title = "Mean verifiability score by configuration",
+  interval_lower = "boot_verifiability_lower",
+  interval_upper = "boot_verifiability_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+verifiability_spec_plot
+
+ggsave(
+  filename = "output/verifiability_spec_plot.png", 
+  plot = verifiability_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+### Specification curve: Actionability quality
+
+```{r}
+#| label: spec curve actionability quality
+
+actionability_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_actionability_label,
+    boot_actionability_label_lower,      
+    boot_actionability_label_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    actionability = mean(mean_actionability_label),
+    boot_actionability_lower = mean(boot_actionability_label_lower),
+    boot_actionability_upper = mean(boot_actionability_label_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(actionability) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = actionability,
+  outcome_name = "Mean actionability",
+  plot_title = "Mean actionability score by configuration",
+  interval_lower = "boot_actionability_lower",
+  interval_upper = "boot_actionability_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+actionability_spec_plot
+
+ggsave(
+  filename = "output/actionability_spec_plot.png", 
+  plot = actionability_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+### Specification curve: Helpfulness quality
+
+```{r}
+#| label: spec curve helpfulness quality
+
+helpfulness_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_helpfulness_label,
+    boot_helpfulness_label_lower,      
+    boot_helpfulness_label_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    helpfulness = mean(mean_helpfulness_label),
+    boot_helpfulness_lower = mean(boot_helpfulness_label_lower),
+    boot_helpfulness_upper = mean(boot_helpfulness_label_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(helpfulness) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = helpfulness,
+  outcome_name = "Mean helpfulness",
+  plot_title = "Mean helpfulness score by configuration",
+  interval_lower = "boot_helpfulness_lower",
+  interval_upper = "boot_helpfulness_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+helpfulness_spec_plot
+
+ggsave(
+  filename = "output/helpfulness_spec_plot.png", 
+  plot = helpfulness_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+### Specification curve: Specification quality
+
+```{r}
+#| label: spec curve specificity quality
+
+specificity_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_grounding_specificity_label,
+    boot_grounding_specificity_label_lower,      
+    boot_grounding_specificity_label_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    specificity = mean(mean_grounding_specificity_label),
+    boot_specificity_lower = mean(boot_grounding_specificity_label_lower),
+    boot_specificity_upper = mean(boot_grounding_specificity_label_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(specificity) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = specificity,
+  outcome_name = "Mean specificity",
+  plot_title = "Mean specificity score by configuration",
+  interval_lower = "boot_specificity_lower",
+  interval_upper = "boot_specificity_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+specificity_spec_plot
+
+ggsave(
+  filename = "output/specificity_spec_plot.png", 
+  plot = specificity_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+# Inferential testing
+
+## Test function
+
+```{r}
+#| label: inferential test function
+
 # Function for conditional posthoc tests
-conditional_posthoc_function <- function(model, alpha = 0.05, adjust = "bonferroni") {
+conditional_posthoc_function <- function(model, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE) {
   
   # Check if model is binomial (glmer) or linear (lmer)
   is_glmer <- inherits(model, "glmerMod")
@@ -960,7 +1224,6 @@ conditional_posthoc_function <- function(model, alpha = 0.05, adjust = "bonferro
   anova_res <- tryCatch({
     car::Anova(model, type = "II", test.statistic = test_stat)
   }, error = function(e) {
-    message("ANOVA failed: ", e$message)
     return(NULL)
   })
   
@@ -969,18 +1232,23 @@ conditional_posthoc_function <- function(model, alpha = 0.05, adjust = "bonferro
   # Identify the p-value column (it's either Pr(>Chisq) or Pr(>F))
   p_col <- grep("Pr\\(>", colnames(anova_res), value = TRUE)
   
-  # Handle cases where no terms are significant
-  sig_mask <- anova_res[[p_col]] < alpha
-  terms <- rownames(anova_res)
-  terms <- terms[!terms %in% c("(Intercept)", "Residuals")]
+  # Identify significant terms
+  sig_terms <- rownames(anova_res)[anova_res[[p_col]] < alpha]
+  sig_terms <- sig_terms[!sig_terms %in% c("(Intercept)", "Residuals")]
   
-  if(length(terms) == 0) {
-    message("No significant terms found at alpha ", alpha)
-    return(list(anova = anova_res, posthoc = list()))
+  # Result of the AONVA
+  cat("OMNIBUS ANOVA TEST:\n")
+  print(anova_res)
+  
+  # Handle cases where no terms are significant
+  if(length(sig_terms) == 0) {
+    cat("POST-HOC TESTS:\n")
+    cat("No significant main effects found (all p >", alpha, "). Post-hoc tests skipped.\n")
+    return(invisible(list(anova = anova_res, posthoc = NULL)))
   }
   
-  # Run post-hoc tests
-  results <- lapply(terms, function(term) {
+  # Run post-hoc tests for significant terms only
+  results <- lapply(sig_terms, function(term) {
 
     spec_formula <- as.formula(paste("~", term))
     
@@ -996,25 +1264,68 @@ conditional_posthoc_function <- function(model, alpha = 0.05, adjust = "bonferro
       as.data.frame() |> 
       mutate(term = term)
   })
+  names(results) <- sig_terms
   
-  names(results) <- terms
-  return(list(anova = anova_res, posthoc = results))
+  # Loop through post-hoc results
+  for(nm in names(results)) {
+    cat("Factor:", nm)
+    print(results[[nm]], row.names = FALSE)
+  }
+  
+  return(invisible(list(anova = anova_res, posthoc = results)))
+
 }
 ```
 
-```{r}
-lmm_mean_total <- lme4::lmer(tvd_mi_score ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
-                             data = paper_llm_processed)
-posthoc_mean_total <- conditional_posthoc_function(lmm_mean_total, alpha = ALPHA, adjust = POST_HOC_CORRECTION)
-```
+## Linear mixed model: Verification quality
 
 ```{r}
-posthoc_mean_total
+#| label: inferential test verifiability
+
+lmm_verifiability <- lme4::lmer(verifiability_label ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
+                             data = review_data_calculated)
+
+conditional_posthoc_function(lmm_verifiability, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
+```
+
+## Linear mixed model: Actionability quality
+
+```{r}
+#| label: inferential test actionability
+
+lmm_actionability <- lme4::lmer(actionability_label ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
+                             data = review_data_calculated)
+
+conditional_posthoc_function(lmm_actionability, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
+```
+
+## Linear mixed model: Helpfulness quality
+
+```{r}
+#| label: inferential test helpfulness
+
+lmm_helpfulness <- lme4::lmer(helpfulness_label ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
+                             data = review_data_calculated)
+
+conditional_posthoc_function(lmm_helpfulness, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
+```
+
+## Linear mixed model: Specificiation quality
+
+```{r}
+#| label: inferential test specificity
+
+lmm_specificity <- lme4::lmer(grounding_specificity_label ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
+                             data = review_data_calculated)
+
+conditional_posthoc_function(lmm_specificity, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
 ```
 
 # Session info
 
 ```{r}
+#| label: meta info
+
 sessionInfo()
 ```
 
