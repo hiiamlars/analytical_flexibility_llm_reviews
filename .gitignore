@@ -2,3 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+# Ignore the entire folder
+.env
+.env.local
+.positai
