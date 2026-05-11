@@ -76,7 +76,9 @@ needed_packages <- c(
   "ggtext",
   "rlang",
   "styler",
-  "grid"
+  "grid",
+  "flextable",
+  "officer"
 )
 
 # Helper function for package installation
@@ -106,15 +108,6 @@ invisible(lapply(needed_packages, load_pkg))
 ```{r}
 #| label: hardcoded values
 
-# Error flags
-REVIEW_GENERATION_FAILURE = "ERROR: REVIEW GENERATION NOT SUCCESSFUL"
-PARALLEL_PROCESSING_FAILURE = "ERROR: UNKNOWN STATE REACHED IN PARALLEL PROCESSING"
-EXTRACTION_FAILURE = "ERROR: SEGMENT EXTRACTION FAILED"
-JUDGE_GENERATION_FAILURE = "ERROR: FAILED TO GENERATE JUDGEMENT"
-JUDGE_CLIENT_FAILURE = "ERROR: UNKNOWN CLIENT ERROR"
-EXTRACTION_FAILURE_II = "ERROR: FAILED TO EXTRACT JSON FROM RAW JUDGEMENT"
-PARSING_FAILURE = "ERROR: FAILED TO PARSE JSON JUDGEMENT"
-
 # Column names
 CONFIG_COL <- c("model", "hyperparameter", "chain_of_thought", "note_taking", "config_group")
 COMBO_COL <- c("paper_id", CONFIG_COL)
@@ -125,9 +118,16 @@ EXTERNAL_SCORE_COL <- c("actionability_label", "grounding_specificity_label", "v
 NUM_ITERATIONS <- 100
 CONFIDENCE_LVL <- 0.95
 
-# Posthoc tests settings
+# Post-hoc tests settings
+MERGED_FACTORS <- "model_setting"
 ALPHA <- 0.05
 POST_HOC_CORRECTION_TYPE = "holm"
+VAR_LABELS <- c(
+  MERGED_FACTORS     = "Model setting",
+  "chain_of_thought" = "Chain of thought",
+  "note_taking"      = "Notes",
+  "helpfulness_label"= "Helpfulness score"
+)
 ```
 
 # Data loading
@@ -144,62 +144,12 @@ review_data <- read_parquet(full_path_llm_reviews,
 
 # Data processing
 
-## Content check
-
-```{r}
-#| label: tier function
-
-# Define tier ranking logic
-#' Assign Tier Ranking to Review Outcomes
-#'
-#' Categorizes the success or failure type of a review process into a numerical 
-#' rank (1–7). This ranking is typically used to filter data or to determine 
-#' the furthest point reached in the analysis pipeline for each observation.
-#'
-#' @param x A character or numeric value representing the outcome of a review 
-#'   or extraction step (e.g., a score, a failure constant, or "X").
-#'
-#' @return An integer from 1 to 7, where:
-#'   \itemize{
-#'     \item \strong{1}: Success (Valid score 1-5 or placeholder "X").
-#'     \item \strong{2-3}: Extraction/Parsing issues (Partial success).
-#'     \item \strong{4}: Judge-related failures (Review exists, but wasn't graded).
-#'     \item \strong{5-6}: Critical failures (Review generation or processing failed).
-#'     \item \strong{7}: Unknown or uncategorized outcomes.
-#'   }
-get_val_rank <- function(x) {
-  case_when(
-    x == "X" | x %in% as.character(1:5) | x %in% 1:5 ~ 1,
-    x == PARSING_FAILURE                           ~ 2,
-    x == EXTRACTION_FAILURE_II                     ~ 3,
-    x == JUDGE_GENERATION_FAILURE                  ~ 4,
-    x == JUDGE_CLIENT_FAILURE                      ~ 4, # must be reached to count review generation as success
-    x == EXTRACTION_FAILURE                        ~ 5,
-    x == REVIEW_GENERATION_FAILURE                 ~ 6,
-    x == PARALLEL_PROCESSING_FAILURE               ~ 6,
-    TRUE ~ 7
-  )
-}
-```
-
-```{r}
-#| label: tier ranking
-
-# Assign tier ranks
-review_data_tiered <- review_data |>
-  rowwise() |>
-  mutate(
-    segment_tier = max(c_across(all_of(EXTERNAL_SCORE_COL)) |> map_dbl(get_val_rank))
-  )  |> 
-  ungroup()
-```
-
 ## Transformation and calculation
 
 ```{r}
 #| label: score transformation and calculation
 
-review_data_calculated <- review_data_tiered |> 
+review_data_calculated <- review_data |> 
   # Factorize ID columns
   mutate(
     paper_id = as.factor(paper_id),
@@ -230,30 +180,19 @@ review_data_calculated <- review_data_tiered |>
       "" ~ "False"
     )
   ) |> 
-  # Create new column to distinguish if a comment needed verification in the first place
-  mutate(
-    # TRUE = made a claim (1-5), FALSE = did not (X), NA = judge failed
-    is_verifiable_claim = case_when(
-      verifiability_label %in% as.character(1:5) ~ TRUE,
-      verifiability_label == "X" ~ FALSE,
-      TRUE ~ NA # Error strings or unknown states
-    )
-  ) |> 
   # Convert all scores to numeric
-  mutate(across(all_of(c(INTERNAL_SCORE_COL, EXTERNAL_SCORE_COL)), ~ suppressWarnings(as.numeric(as.character(.x))))) |> 
-  # Group to unit of analysis (whole reviews)
+  mutate(across(all_of(c(INTERNAL_SCORE_COL, EXTERNAL_SCORE_COL)),
+                ~ suppressWarnings(as.numeric(as.character(.x))))) |>
+  # Group to unit of analysis (reviews)
   group_by(across(all_of(COMBO_COL))) |>
   summarise(
-    # Success: All reviews' segments are valid or failed only after review generation and extraction steps)
-    is_success = all(segment_tier <= 4),
+    # Success
+    is_success = first(generation_successful),
     
-    # Quality: Average "quality" across all of the reviews' segments
+    # Quality
     across(all_of(EXTERNAL_SCORE_COL), ~ mean(.x, na.rm = TRUE)),
     
-    # Verifiability: Proportion of comments needed to be verified across all of the reviews' segments
-    review_verifiability_rate = mean(is_verifiable_claim, na.rm = TRUE),
-    
-    # Sensitivty: Scores included in a single review
+    # Internal scores
     across(all_of(INTERNAL_SCORE_COL), ~ mean(.x, na.rm = TRUE)),
     
     .groups = "drop"
@@ -263,10 +202,13 @@ review_data_calculated <- review_data_tiered |>
 review_data_summary <- review_data_calculated |>
   group_by(across(all_of(CONFIG_COL))) |>
   summarise(
-    # Calculate mean per group
-    mean_success       = mean(is_success, na.rm = TRUE),
-    mean_verifiability = mean(review_verifiability_rate, na.rm = TRUE),
+    # Success
+    mean_success = mean(as.logical(is_success), na.rm = TRUE),
+    
+    # Quality
     across(all_of(EXTERNAL_SCORE_COL), ~mean(.x, na.rm = TRUE), .names = "mean_{.col}"),
+    
+    # Internal scores
     across(all_of(INTERNAL_SCORE_COL), ~mean(.x, na.rm = TRUE), .names = "mean_{.col}"),
     
     .groups = "drop"
@@ -307,17 +249,14 @@ bootstrap <- function(df, group_col, iterations = NUM_ITERATIONS) {
       slice_sample(prop = 1, replace = TRUE) |> 
       summarise(
         # Success
-        boot_success_rate = mean(is_success, na.rm = TRUE),
+        boot_success_rate = mean(as.logical(is_success), na.rm = TRUE),
         
         # Quality
         across(all_of(EXTERNAL_SCORE_COL), 
                ~mean(.x, na.rm = TRUE),
                .names = "boot_{.col}"),
         
-        # Verifiability
-        boot_verifiable_rate = mean(review_verifiability_rate, na.rm = TRUE),
-        
-        # Sensitivity
+        # Internal scores
         across(all_of(INTERNAL_SCORE_COL), 
                ~mean(.x, na.rm = TRUE),
                .names = "boot_{.col}"),
@@ -356,7 +295,6 @@ boot_results <- bootstrap(review_data_calculated, "config_group")
 review_data_bootstraped <- review_data_summary |> 
   left_join(boot_results, "config_group")
 ```
-
 
 # Data plotting
 
@@ -741,53 +679,206 @@ data_plot <- review_data_bootstraped |>
   )
 ```
 
-## Success metric
+## Quality metrics
 
-### Specification curve: Succcess rate
+### Specification curve: Helpfulness
 
 ```{r}
-#| label: spec curve success rate quality
+#| label: spec curve helpfulness
 
-success_spec_plot <- data_plot |>  
+helpfulness_spec_plot <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
     `Hyper-<br> parameter`, 
     `CoT<br> used`, 
     `Notes`,
-    mean_success,
-    boot_success_rate_lower,      
-    boot_success_rate_upper
+    mean_helpfulness_label,
+    boot_helpfulness_label_lower,      
+    boot_helpfulness_label_upper
   ) |> 
   # Summarize
   group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
-    success_rate = mean(mean_success),
-    boot_success_lower = mean(boot_success_rate_lower),
-    boot_success_upper = mean(boot_success_rate_upper),
+    helpfulness = mean(mean_helpfulness_label),
+    boot_helpfulness_lower = mean(boot_helpfulness_label_lower),
+    boot_helpfulness_upper = mean(boot_helpfulness_label_upper),
     .groups = "drop"
   ) |> 
-  arrange(success_rate) |>
+  arrange(helpfulness) |>
   mutate(rank = row_number()) |> 
   # Plot call
   specification_curve_plot_with_shading(
-  outcome = success_rate,
-  outcome_name = "Mean success rate",
-  plot_title = "Mean success rate by configuration",
-  interval_lower = "boot_success_lower",
-  interval_upper = "boot_success_upper",
+  outcome = helpfulness,
+  outcome_name = "Mean helpfulness",
+  plot_title = "Mean helpfulness score by configuration",
+  interval_lower = "boot_helpfulness_lower",
+  interval_upper = "boot_helpfulness_upper",
   rank_by = rank,
   
   mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 1)))
+    list(top + coord_cartesian(ylim = c(0, 5)))
   }
 )
 
-success_spec_plot
+helpfulness_spec_plot
 
 ggsave(
-  filename = "output/success_spec_plot.png", 
-  plot = success_spec_plot, 
+  filename = "output/plots/helpfulness_spec_plot.png", 
+  plot = helpfulness_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+### Specification curve: Actionability
+
+```{r}
+#| label: spec curve actionability
+
+actionability_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_actionability_label,
+    boot_actionability_label_lower,      
+    boot_actionability_label_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    actionability = mean(mean_actionability_label),
+    boot_actionability_lower = mean(boot_actionability_label_lower),
+    boot_actionability_upper = mean(boot_actionability_label_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(actionability) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = actionability,
+  outcome_name = "Mean actionability",
+  plot_title = "Mean actionability score by configuration",
+  interval_lower = "boot_actionability_lower",
+  interval_upper = "boot_actionability_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+actionability_spec_plot
+
+ggsave(
+  filename = "output/plots/actionability_spec_plot.png", 
+  plot = actionability_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+### Specification curve: Grounding & Specificity
+
+```{r}
+#| label: spec curve grounding and specificity
+
+specificity_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_grounding_specificity_label,
+    boot_grounding_specificity_label_lower,      
+    boot_grounding_specificity_label_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    specificity = mean(mean_grounding_specificity_label),
+    boot_specificity_lower = mean(boot_grounding_specificity_label_lower),
+    boot_specificity_upper = mean(boot_grounding_specificity_label_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(specificity) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = specificity,
+  outcome_name = "Mean grounding & specificity",
+  plot_title = "Mean grounding & specificity score by configuration",
+  interval_lower = "boot_specificity_lower",
+  interval_upper = "boot_specificity_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+specificity_spec_plot
+
+ggsave(
+  filename = "output/plots/specificity_spec_plot.png", 
+  plot = specificity_spec_plot, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+### Specification curve: Verifiability
+
+```{r}
+#| label: spec curve verifiability
+
+verifiability_spec_plot <- data_plot |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    mean_verifiability_label,
+    boot_verifiability_label_lower,      
+    boot_verifiability_label_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    verifiability = mean(mean_verifiability_label),
+    boot_verifiability_lower = mean(boot_verifiability_label_lower),
+    boot_verifiability_upper = mean(boot_verifiability_label_upper),
+    .groups = "drop"
+  ) |> 
+  arrange(verifiability) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+  outcome = verifiability,
+  outcome_name = "Mean verifiability",
+  plot_title = "Mean verifiability score by configuration",
+  interval_lower = "boot_verifiability_lower",
+  interval_upper = "boot_verifiability_upper",
+  rank_by = rank,
+  
+  mutate_plots = \(top, bottom, df) {
+    list(top + coord_cartesian(ylim = c(0, 5)))
+  }
+)
+
+verifiability_spec_plot
+
+ggsave(
+  filename = "output/plots/verifiability_spec_plot.png", 
+  plot = verifiability_spec_plot, 
   width = PLOT_WIDTH, 
   height = PLOT_HEIGHT, 
   dpi = PLOT_DPI
@@ -839,7 +930,7 @@ correctness_spec_plot <- data_plot |>
 correctness_spec_plot
 
 ggsave(
-  filename = "output/correctness_spec_plot.png", 
+  filename = "output/plots/correctness_spec_plot.png", 
   plot = correctness_spec_plot, 
   width = PLOT_WIDTH, 
   height = PLOT_HEIGHT, 
@@ -890,7 +981,7 @@ technical_novelty_spec_plot <- data_plot |>
 technical_novelty_spec_plot
 
 ggsave(
-  filename = "output/technical_novelty_spec_plot.png", 
+  filename = "output/plots/technical_novelty_spec_plot.png", 
   plot = technical_novelty_spec_plot, 
   width = PLOT_WIDTH, 
   height = PLOT_HEIGHT, 
@@ -941,7 +1032,7 @@ empirical_novelty_spec_plot <- data_plot |>
 empirical_novelty_spec_plot
 
 ggsave(
-  filename = "output/empirical_novelty_spec_plot.png", 
+  filename = "output/plots/empirical_novelty_spec_plot.png", 
   plot = empirical_novelty_spec_plot, 
   width = PLOT_WIDTH, 
   height = PLOT_HEIGHT, 
@@ -949,41 +1040,41 @@ ggsave(
 )
 ```
 
-## Quality metrics
+## Success metric
 
-### Specification curve: Verification density
+### Specification curve: Succcess rate
 
 ```{r}
-#| label: spec curve verifiability density
+#| label: spec curve success rate quality
 
-verifiability_density_spec_plot <- data_plot |>  
+success_spec_plot <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
     `Hyper-<br> parameter`, 
     `CoT<br> used`, 
     `Notes`,
-    mean_verifiability,
-    boot_verifiable_rate_lower,      
-    boot_verifiable_rate_upper
+    mean_success,
+    boot_success_rate_lower,      
+    boot_success_rate_upper
   ) |> 
   # Summarize
   group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
-    verifiability = mean(mean_verifiability),
-    boot_verifiability_lower = mean(boot_verifiable_rate_lower),
-    boot_verifiability_upper = mean(boot_verifiable_rate_upper),
+    success_rate = mean(mean_success),
+    boot_success_lower = mean(boot_success_rate_lower),
+    boot_success_upper = mean(boot_success_rate_upper),
     .groups = "drop"
   ) |> 
-  arrange(verifiability) |>
+  arrange(success_rate) |>
   mutate(rank = row_number()) |> 
   # Plot call
   specification_curve_plot_with_shading(
-  outcome = verifiability,
-  outcome_name = "Mean verifiability rate",
-  plot_title = "Mean verifiability rate by configuration",
-  interval_lower = "boot_verifiability_lower",
-  interval_upper = "boot_verifiability_upper",
+  outcome = success_rate,
+  outcome_name = "Mean success rate",
+  plot_title = "Mean success rate by configuration",
+  interval_lower = "boot_success_lower",
+  interval_upper = "boot_success_upper",
   rank_by = rank,
   
   mutate_plots = \(top, bottom, df) {
@@ -991,216 +1082,11 @@ verifiability_density_spec_plot <- data_plot |>
   }
 )
 
-verifiability_density_spec_plot
+success_spec_plot
 
 ggsave(
-  filename = "output/verifiability_density_spec_plot.png", 
-  plot = verifiability_density_spec_plot, 
-  width = PLOT_WIDTH, 
-  height = PLOT_HEIGHT, 
-  dpi = PLOT_DPI
-)
-```
-
-
-### Specification curve: Verification  quality
-
-```{r}
-#| label: spec curve verification quality
-
-verifiability_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyper-<br> parameter`, 
-    `CoT<br> used`, 
-    `Notes`,
-    mean_verifiability_label,
-    boot_verifiability_label_lower,      
-    boot_verifiability_label_upper
-  ) |> 
-  # Summarize
-  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
-  summarise(
-    verifiability = mean(mean_verifiability_label),
-    boot_verifiability_lower = mean(boot_verifiability_label_lower),
-    boot_verifiability_upper = mean(boot_verifiability_label_upper),
-    .groups = "drop"
-  ) |> 
-  arrange(verifiability) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-  outcome = verifiability,
-  outcome_name = "Mean verifiability",
-  plot_title = "Mean verifiability score by configuration",
-  interval_lower = "boot_verifiability_lower",
-  interval_upper = "boot_verifiability_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 5)))
-  }
-)
-
-verifiability_spec_plot
-
-ggsave(
-  filename = "output/verifiability_spec_plot.png", 
-  plot = verifiability_spec_plot, 
-  width = PLOT_WIDTH, 
-  height = PLOT_HEIGHT, 
-  dpi = PLOT_DPI
-)
-```
-
-### Specification curve: Actionability quality
-
-```{r}
-#| label: spec curve actionability quality
-
-actionability_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyper-<br> parameter`, 
-    `CoT<br> used`, 
-    `Notes`,
-    mean_actionability_label,
-    boot_actionability_label_lower,      
-    boot_actionability_label_upper
-  ) |> 
-  # Summarize
-  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
-  summarise(
-    actionability = mean(mean_actionability_label),
-    boot_actionability_lower = mean(boot_actionability_label_lower),
-    boot_actionability_upper = mean(boot_actionability_label_upper),
-    .groups = "drop"
-  ) |> 
-  arrange(actionability) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-  outcome = actionability,
-  outcome_name = "Mean actionability",
-  plot_title = "Mean actionability score by configuration",
-  interval_lower = "boot_actionability_lower",
-  interval_upper = "boot_actionability_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 5)))
-  }
-)
-
-actionability_spec_plot
-
-ggsave(
-  filename = "output/actionability_spec_plot.png", 
-  plot = actionability_spec_plot, 
-  width = PLOT_WIDTH, 
-  height = PLOT_HEIGHT, 
-  dpi = PLOT_DPI
-)
-```
-
-### Specification curve: Helpfulness quality
-
-```{r}
-#| label: spec curve helpfulness quality
-
-helpfulness_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyper-<br> parameter`, 
-    `CoT<br> used`, 
-    `Notes`,
-    mean_helpfulness_label,
-    boot_helpfulness_label_lower,      
-    boot_helpfulness_label_upper
-  ) |> 
-  # Summarize
-  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
-  summarise(
-    helpfulness = mean(mean_helpfulness_label),
-    boot_helpfulness_lower = mean(boot_helpfulness_label_lower),
-    boot_helpfulness_upper = mean(boot_helpfulness_label_upper),
-    .groups = "drop"
-  ) |> 
-  arrange(helpfulness) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-  outcome = helpfulness,
-  outcome_name = "Mean helpfulness",
-  plot_title = "Mean helpfulness score by configuration",
-  interval_lower = "boot_helpfulness_lower",
-  interval_upper = "boot_helpfulness_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 5)))
-  }
-)
-
-helpfulness_spec_plot
-
-ggsave(
-  filename = "output/helpfulness_spec_plot.png", 
-  plot = helpfulness_spec_plot, 
-  width = PLOT_WIDTH, 
-  height = PLOT_HEIGHT, 
-  dpi = PLOT_DPI
-)
-```
-
-### Specification curve: Specification quality
-
-```{r}
-#| label: spec curve specificity quality
-
-specificity_spec_plot <- data_plot |>  
-  # Preprocess
-  dplyr::select(
-    `Model`, 
-    `Hyper-<br> parameter`, 
-    `CoT<br> used`, 
-    `Notes`,
-    mean_grounding_specificity_label,
-    boot_grounding_specificity_label_lower,      
-    boot_grounding_specificity_label_upper
-  ) |> 
-  # Summarize
-  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
-  summarise(
-    specificity = mean(mean_grounding_specificity_label),
-    boot_specificity_lower = mean(boot_grounding_specificity_label_lower),
-    boot_specificity_upper = mean(boot_grounding_specificity_label_upper),
-    .groups = "drop"
-  ) |> 
-  arrange(specificity) |>
-  mutate(rank = row_number()) |> 
-  # Plot call
-  specification_curve_plot_with_shading(
-  outcome = specificity,
-  outcome_name = "Mean specificity",
-  plot_title = "Mean specificity score by configuration",
-  interval_lower = "boot_specificity_lower",
-  interval_upper = "boot_specificity_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 5)))
-  }
-)
-
-specificity_spec_plot
-
-ggsave(
-  filename = "output/specificity_spec_plot.png", 
-  plot = specificity_spec_plot, 
+  filename = "output/plots/success_spec_plot.png", 
+  plot = success_spec_plot, 
   width = PLOT_WIDTH, 
   height = PLOT_HEIGHT, 
   dpi = PLOT_DPI
@@ -1209,116 +1095,171 @@ ggsave(
 
 # Inferential testing
 
-## Test function
+## Test functions
 
 ```{r}
-#| label: inferential test function
+#| label: inferential test functions
 
-# Function for conditional posthoc tests
+# Define function for conditional posthoc tests
+#' Conditional Post-hoc Analysis for Mixed-Effects Models
+#'
+#' Automates the transition from an omnibus ANOVA to granular post-hoc comparisons,
+#' executed only for predictors that reach statistical significance.
+#'
+#' @param model A fitted \code{lmerMod} or \code{lmerModLmerTest} object.
+#' @param alpha Numeric. The significance threshold for gating post-hoc tests. 
+#'   Defaults to the global \code{ALPHA}.
+#' @param adjust Character. The method for p-value adjustment (e.g., "bonferroni", "tukey"). 
+#'   Defaults to the global \code{POST_HOC_CORRECTION_TYPE}.
+#'
+#' @return A named list containing two elements:
+#'   \item{anova}{A tibble of the Type II ANOVA results.}
+#'   \item{posthoc}{A nested list for each significant effect containing:
+#'     \itemize{
+#'       \item \code{rankings}: Compact Letter Display (CLD) table for factor levels.
+#'       \item \code{tier_gap}: Cohen's d effect size for the transition between the 
+#'             top-tier (a) and secondary-tier (b) groups.
+#'   }
 conditional_posthoc_function <- function(model, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE) {
   
-  # Check if model is binomial (glmer) or linear (lmer)
-  is_glmer <- inherits(model, "glmerMod")
-  test_stat <- if(is_glmer) "Chisq" else "F"
+  # Global option for df calculation
+  emmeans::emm_options(lmer.df = "asymptotic")
   
-  anova_res <- tryCatch({
-    car::Anova(model, type = "II", test.statistic = test_stat)
-  }, error = function(e) {
-    return(NULL)
-  })
+  # 1. Run ANOVA
+  raw_anova <- car::Anova(model, type = "II", test.statistic = "F") |> as.data.frame()
   
-  if(is.null(anova_res)) return(NULL)
+  # 2. Force the Effect column to exist based on the row names
+  raw_anova$Effect <- rownames(raw_anova)
   
-  # Identify the p-value column (it's either Pr(>Chisq) or Pr(>F))
-  p_col <- grep("Pr\\(>", colnames(anova_res), value = TRUE)
+  # 3. Finalize the ANOVA table
+anova_res <- raw_anova |> 
+    tibble::as_tibble() |> 
+    dplyr::select(Effect, everything()) |>
+    dplyr::filter(!Effect %in% c("(Intercept)", "Residuals"))
   
-  # Identify significant terms
-  sig_terms <- rownames(anova_res)[anova_res[[p_col]] < alpha]
-  sig_terms <- sig_terms[!sig_terms %in% c("(Intercept)", "Residuals")]
+  # 4. Identify significant terms for post-hocs
+  sig_terms <- anova_res$Effect[anova_res[["Pr(>F)"]] < alpha]
   
-  # Result of the AONVA
-  cat("OMNIBUS ANOVA TEST:\n")
-  print(anova_res)
   
-  # Handle cases where no terms are significant
-  if(length(sig_terms) == 0) {
-    cat("POST-HOC TESTS:\n")
-    cat("No significant main effects found (all p >", alpha, "). Post-hoc tests skipped.\n")
-    return(invisible(list(anova = anova_res, posthoc = NULL)))
-  }
-  
-  # Run post-hoc tests for significant terms only
-  results <- lapply(sig_terms, function(term) {
-
+  posthoc_results <- lapply(sig_terms, function(term) {
+    # 5. Post-hoc calculations
     spec_formula <- as.formula(paste("~", term))
-    
-    # Calculate Estimated Marginal Means
     emm <- emmeans::emmeans(model, specs = spec_formula, type = "response")
     
-    # Compact Letter Display (CLD)
-    multcomp::cld(emm, 
-                  alpha = alpha, 
-                  Letters = c(letters, LETTERS), 
-                  adjust = adjust, 
-                  reversed = TRUE) |> 
+    # 6. Rankings (CLD)
+    cld_df <- multcomp::cld(emm, alpha = alpha, Letters = letters, 
+                            adjust = adjust, reversed = TRUE) |> 
       as.data.frame() |> 
-      mutate(term = term)
+      dplyr::arrange(desc(emmean))
+    
+    # 7. Tier Gap Logic
+    last_a <- cld_df |> dplyr::filter(grepl("a", .group)) |> dplyr::slice_tail(n = 1)
+    first_b <- cld_df |> dplyr::filter(grepl("b", .group) & !grepl("a", .group)) |> dplyr::slice_head(n = 1)
+    
+    # 8. Effect size
+    gap_res <- data.frame(Notice = "No significant a/b tier gap found.")
+    if(nrow(last_a) > 0 && nrow(first_b) > 0) {
+      idx_a <- which(summary(emm)[[term]] == as.character(last_a[[term]]))
+      idx_b <- which(summary(emm)[[term]] == as.character(first_b[[term]]))
+      gap_res <- emmeans::eff_size(emm[c(idx_a, idx_b)], sigma = sigma(model), 
+                                   edf = df.residual(model)) |> as.data.frame()
+    }
+    
+    return(list(rankings = cld_df, tier_gap = gap_res, original_term = term))
   })
-  names(results) <- sig_terms
   
-  # Loop through post-hoc results
-  for(nm in names(results)) {
-    cat("Factor:", nm)
-    print(results[[nm]], row.names = FALSE)
-  }
-  
-  return(invisible(list(anova = anova_res, posthoc = results)))
+  names(posthoc_results) <- sig_terms
+  return(list(anova = anova_res, posthoc = posthoc_results))
+}
 
+# Helper function for displaying and saving
+make_apa <- function(df, caption) {
+  flextable(df) |> 
+    theme_apa() |> 
+    set_caption(caption) |> 
+    autofit()
 }
 ```
 
-## Linear mixed model: Verification quality
+## Data preparation
 
 ```{r}
-#| label: inferential test verifiability
 
-lmm_verifiability <- lme4::lmer(verifiability_label ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
-                             data = review_data_calculated)
+review_data_inferential <- review_data_calculated |>
+  # Relevel and factorize
+  mutate(
+    MERGED_FACTORS = as.factor(paste(model, hyperparameter, sep = " with ")),
+    chain_of_thought = fct_relevel(as.factor(chain_of_thought), "True", "False"),
+    note_taking = fct_relevel(as.factor(note_taking), "Faithful", "Turned off"),
+    paper_id = as.factor(paper_id)
+  ) |>
+  # Choose only parameters and score variables
+  dplyr::select(MERGED_FACTORS, chain_of_thought, note_taking, paper_id, helpfulness_label)
 
-conditional_posthoc_function(lmm_verifiability, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
 ```
 
-## Linear mixed model: Actionability quality
+## Linear mixed model: Helpfulness
 
-```{r}
-#| label: inferential test actionability
+```{r, results='asis'}
+#| label: linear mixed model test helpfulness
 
-lmm_actionability <- lme4::lmer(actionability_label ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
-                             data = review_data_calculated)
-
-conditional_posthoc_function(lmm_actionability, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
+lmm_helpfulness <- lme4::lmer(
+  helpfulness_label ~ MERGED_FACTORS + chain_of_thought + note_taking + (1 | paper_id), 
+  data = review_data_inferential
+)
 ```
 
-## Linear mixed model: Helpfulness quality
+## Post-hoc tests: Helpfulness
 
-```{r}
-#| label: inferential test helpfulness
+```{r, results = 'asis'}
+#| label: post-hoc test helpfulness
 
-lmm_helpfulness <- lme4::lmer(helpfulness_label ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
-                             data = review_data_calculated)
+# Run conditional post-hoc tests
+posthoc_results <- conditional_posthoc_function(lmm_helpfulness, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
 
-conditional_posthoc_function(lmm_helpfulness, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
-```
+# --- A. PROCESS ANOVA ---
+if(!is.null(posthoc_results$anova)) {
+  # Change labels
+  anova_pretty <- posthoc_results$anova |>
+    dplyr::mutate(Effect = ifelse(Effect %in% names(VAR_LABELS), VAR_LABELS[Effect], Effect))
+  
+  # Display in report
+  print(knitr::kable(anova_pretty, caption = "Omnibus ANOVA Results", digits = 3))
 
-## Linear mixed model: Specificiation quality
+  # Create APA conform table
+  anova_ft <- make_apa(anova_pretty, "Table 1: Omnibus ANOVA Results")
+  
+  # Save to disk
+  flextable::save_as_docx(anova_ft, path = "output/tables/table_ANOVA.docx")
+}
 
-```{r}
-#| label: inferential test specificity
-
-lmm_specificity <- lme4::lmer(grounding_specificity_label ~ model + hyperparameter + chain_of_thought + note_taking + (1 | paper_id),
-                             data = review_data_calculated)
-
-conditional_posthoc_function(lmm_specificity, alpha = ALPHA, adjust = POST_HOC_CORRECTION_TYPE)
+# --- B. PROCESS POST-HOC TESTS ---
+if(!is.null(posthoc_results$posthoc)) {
+  for(nm in names(posthoc_results$posthoc)) {
+    
+    # Identify the pretty name for headers
+    pretty_name <- ifelse(nm %in% names(VAR_LABELS), VAR_LABELS[nm], nm)
+    res_list <- posthoc_results$posthoc[[nm]]
+    
+    # Ranking table preparation
+    rank_df <- res_list$rankings
+    colnames(rank_df)[colnames(rank_df) == nm] <- pretty_name
+    
+    # Display in report
+    cat("### Factor: ", pretty_name, "\n")
+    print(knitr::kable(rank_df, caption = paste("Tiers:"), digits = 3))
+    cat("\n")
+    print(knitr::kable(res_list$tier_gap, caption = paste("Effect size(s):"), digits = 3))
+    
+    # Create APA conform tables
+    rank_ft <- make_apa(rank_df, paste("Rankings for", pretty_name))
+    gap_ft <- make_apa(res_list$tier_gap, paste("Tier Gap for", pretty_name))
+    
+    # Save to disk
+    flextable::save_as_docx(rank_ft, path = paste0("output/tables/table_rankings_", nm, ".docx"))
+    flextable::save_as_docx(gap_ft, path = paste0("output/tables/table_effectSize_", nm, ".docx"))
+  }
+}
 ```
 
 # Session info
