@@ -60,47 +60,28 @@ path <- "G:/Meine Ablage/Analytical_flexibility_llm_reviews/llm_reviews/parsed"
 # File name
 llm_reviews <- "results.parquet"
 
-# Necessary packages
-needed_packages <- c(
-  "arrow",
-  "tidyverse",
-  "lme4",
-  "car",
-  "emmeans",
-  "multcomp",
-  "multcompView",
-  "broom.mixed",
-  "knitr",
-  "kableExtra",
-  "cowplot",
-  "ggtext",
-  "rlang",
-  "styler",
-  "grid",
-  "flextable",
-  "officer"
+# Package mangagement
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  arrow,
+  tidyverse,
+  lme4,
+  car,
+  emmeans,
+  multcomp,
+  multcompView,
+  broom.mixed,
+  knitr,
+  kableExtra,
+  cowplot,
+  ggtext,
+  rlang,
+  styler,
+  grid,
+  flextable,
+  officer
 )
-
-# Helper function for package installation
-#' Conditional Package Loader and Installer
-#'
-#' Checks for the presence of a specified R package. If the package is not 
-#' already installed, it downloads and installs it from CRAN along with 
-#' any required dependencies. Finally, it loads the package into the namespace.
-#'
-#' @param pkg A character string representing the name of the package to be loaded.
-#'
-#' @return None. This function is used for the side effect of loading and 
-#'   potentially installing a library.
-load_pkg <- function(pkg) {
-  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
-    install.packages(pkg, dependencies = TRUE)
-    library(pkg, character.only = TRUE)
-  }
-}
-
-# Execution of helper function
-invisible(lapply(needed_packages, load_pkg))
 ```
 
 # Hardcoded values
@@ -111,8 +92,7 @@ invisible(lapply(needed_packages, load_pkg))
 # Column names
 CONFIG_COL <- c("model", "hyperparameter", "chain_of_thought", "note_taking", "config_group")
 COMBO_COL <- c("paper_id", CONFIG_COL)
-INTERNAL_SCORE_COL <- c("correctness_rating", "technical_novelty_significance_rating", "empirical_novelty_significance_rating")
-EXTERNAL_SCORE_COL <- c("actionability_label", "grounding_specificity_label", "verifiability_label", "helpfulness_label")
+SCORE_COL <- c("actionability_label", "grounding_specificity_label", "verifiability_label", "helpfulness_label")
 
 # Bootstrap settings
 NUM_ITERATIONS <- 2000
@@ -170,20 +150,18 @@ review_data_calculated <- review_data |>
     )
   ) |> 
   # Convert all scores to numeric
-  mutate(across(all_of(c(INTERNAL_SCORE_COL, EXTERNAL_SCORE_COL)),
+  mutate(across(all_of(c(SCORE_COL)),
                 ~ suppressWarnings(as.numeric(as.character(.x))))) |>
   # Group to unit of analysis (reviews)
   group_by(across(all_of(COMBO_COL))) |>
   summarise(
-    # Success
-    is_success = first(generation_successful),
     
     # Quality
-    across(all_of(EXTERNAL_SCORE_COL), ~ mean(.x, na.rm = TRUE)),
+    across(all_of(SCORE_COL), ~ mean(.x, na.rm = TRUE)),
     
-    # Internal scores
-    across(all_of(INTERNAL_SCORE_COL), ~ mean(.x, na.rm = TRUE)),
-    
+    # Success
+    is_success = first(generation_successful),
+
     .groups = "drop"
   )
 
@@ -191,14 +169,12 @@ review_data_calculated <- review_data |>
 review_data_summary <- review_data_calculated |>
   group_by(across(all_of(CONFIG_COL))) |>
   summarise(
-    # Success
-    mean_success = mean(as.logical(is_success), na.rm = TRUE),
     
     # Quality
-    across(all_of(EXTERNAL_SCORE_COL), ~mean(.x, na.rm = TRUE), .names = "mean_{.col}"),
+    across(all_of(SCORE_COL), ~mean(.x, na.rm = TRUE), .names = "mean_{.col}"),
     
-    # Internal scores
-    across(all_of(INTERNAL_SCORE_COL), ~mean(.x, na.rm = TRUE), .names = "mean_{.col}"),
+    # Success
+    mean_success = mean(as.logical(is_success), na.rm = TRUE),
     
     .groups = "drop"
   )
@@ -237,18 +213,14 @@ bootstrap <- function(df, group_col, iterations = NUM_ITERATIONS) {
       # Sample with replacement
       slice_sample(prop = 1, replace = TRUE) |> 
       summarise(
-        # Success
-        boot_success_rate = mean(as.logical(is_success), na.rm = TRUE),
         
         # Quality
-        across(all_of(EXTERNAL_SCORE_COL), 
+        across(all_of(SCORE_COL), 
                ~mean(.x, na.rm = TRUE),
                .names = "boot_{.col}"),
         
-        # Internal scores
-        across(all_of(INTERNAL_SCORE_COL), 
-               ~mean(.x, na.rm = TRUE),
-               .names = "boot_{.col}"),
+        # Success
+        boot_success_rate = mean(as.logical(is_success), na.rm = TRUE),
         
         .groups = "drop"
       )
