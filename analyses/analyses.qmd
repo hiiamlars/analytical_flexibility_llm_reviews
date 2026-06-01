@@ -55,7 +55,7 @@ knitr::opts_chunk$set(
 #| warning: false
 
 # Path
-path <- "G:/Meine Ablage/Analytical_flexibility_llm_reviews/llm_reviews/parsed"
+path <- "../data/"
 
 # File name
 llm_reviews <- "results.parquet"
