@@ -1,8 +1,8 @@
+# R specific files
 .Rproj.user
 .Rhistory
 .RData
 .Ruserdata
-# Ignore the entire folder
-.env
-.env.local
-.positai
+
+# Potentially temporary rendered output folder
+analyses/.quarto/
