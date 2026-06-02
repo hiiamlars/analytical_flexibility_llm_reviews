@@ -35,7 +35,7 @@ The python notebooks create all necessary folders for data storage and data load
 
 ```text
 MyDrive/
-├── Analytical_flexibility_llm_reviews
+└── Analytical_flexibility_llm_reviews/
     └── iclr
 ```
 
@@ -44,7 +44,7 @@ MyDrive/
 The Quarto file will load the data according to psychDS structure from a sub-folder `data`. Please note that is not the same location where the final python notebook has stored this file which means it will have to be copied over manually.
 
 ```text
-analytical_flexibility_llm_reviews
-    └── data
+analytical_flexibility_llm_reviews/
+└── data
 ```
 Note that you can make changes to the folder system or the overall setup but may need to adapt the scripts in that case.
