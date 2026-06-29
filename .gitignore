@@ -7,5 +7,5 @@
 # Potentially temporary rendered output folder
 analyses/.quarto/
 
-# Any local data files
+# Data files
 data/
