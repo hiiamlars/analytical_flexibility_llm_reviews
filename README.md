@@ -24,6 +24,9 @@ analytic_flexibility_llm_reviews/
 │   ├── 03_llm_review_judgements.ipynb
 │   ├── 04_llm_review_post_processing.ipynb
 │   └── llm_review_generation.ipynb
+├── data/
+│   ├── iclr/
+│   └── llm_reviews/
 └── analyses/
     ├── analyses.qmd
     ├── analyses.html
@@ -40,7 +43,7 @@ The python notebooks create all necessary folders for data storage and data load
 ```text
 MyDrive/
 └── Analytical_flexibility_llm_reviews/
-    └── iclr
+    └── iclr/
 ```
 
 # Data Management for Data Analyses
