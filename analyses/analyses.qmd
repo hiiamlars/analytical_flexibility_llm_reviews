@@ -55,7 +55,7 @@ knitr::opts_chunk$set(
 #| warning: false
 
 # Path
-path <- "../data/"
+path <- "../data/llm_reviews/parsed"
 
 # File name
 llm_reviews <- "results.parquet"
@@ -646,6 +646,8 @@ data_plot <- review_data_bootstraped |>
 
 ```{r}
 #| label: spec curve helpfulness
+#| warning: false
+#| message: false
 
 helpfulness_spec_plot <- data_plot |>  
   # Preprocess
@@ -697,6 +699,8 @@ ggsave(
 
 ```{r}
 #| label: spec curve actionability
+#| warning: false
+#| message: false
 
 actionability_spec_plot <- data_plot |>  
   # Preprocess
@@ -748,6 +752,8 @@ ggsave(
 
 ```{r}
 #| label: spec curve grounding and specificity
+#| warning: false
+#| message: false
 
 specificity_spec_plot <- data_plot |>  
   # Preprocess
@@ -799,6 +805,8 @@ ggsave(
 
 ```{r}
 #| label: spec curve verifiability
+#| warning: false
+#| message: false
 
 verifiability_spec_plot <- data_plot |>  
   # Preprocess
