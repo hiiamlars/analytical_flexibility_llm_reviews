@@ -649,13 +649,14 @@ data_plot <- review_data_bootstraped |>
 #| warning: false
 #| message: false
 
-helpfulness_spec_plot <- data_plot |>  
+data_prepared_helpfulness <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
     `Hyper-<br> parameter`, 
     `CoT<br> used`, 
     `Notes`,
+    mean_success,
     mean_helpfulness_label,
     boot_helpfulness_label_lower,      
     boot_helpfulness_label_upper
@@ -663,18 +664,40 @@ helpfulness_spec_plot <- data_plot |>
   # Summarize
   group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
+    success_rate = mean(mean_success, na.rm = TRUE),
     helpfulness = mean(mean_helpfulness_label),
-    boot_helpfulness_lower = mean(boot_helpfulness_label_lower),
-    boot_helpfulness_upper = mean(boot_helpfulness_label_upper),
+    boot_helpfulness_lower = mean(boot_helpfulness_label_lower, na.rm = TRUE),
+    boot_helpfulness_upper = mean(boot_helpfulness_label_upper, na.rm = TRUE),
     .groups = "drop"
-  ) |> 
+  )
+
+# Drop configurations which fail on most runs
+data_prepared_filtered_helpfulness <- data_prepared_helpfulness |> 
+  filter(success_rate >= 0.25)
+
+# Minimum and maximum data points
+min_config_helpfulness <- min(data_prepared_helpfulness$helpfulness, na.rm = TRUE)
+max_config_helpfulness <- max(data_prepared_helpfulness$helpfulness, na.rm = TRUE)
+
+# Inference: Overlap of confidence intervals
+lower_bound_max_helpfulness <- max(data_prepared_helpfulness$boot_helpfulness_lower, na.rm = TRUE)
+upper_bound_min_helpfulness <- min(data_prepared_helpfulness$boot_helpfulness_lower, na.rm = TRUE)
+cis_all_overlap <- lower_bound_max_helpfulness <= upper_bound_min_helpfulness
+
+# Inference: Overlap of confidence intervals without dropped configurations
+lower_bound_max_helpfulness_filt <- max(data_prepared_filtered_helpfulness$boot_helpfulness_lower, na.rm = TRUE)
+upper_bound_min_helpfulness_filt <- min(data_prepared_filtered_helpfulness$boot_helpfulness_upper, na.rm = TRUE)
+cis_all_overlap_filtered <- lower_bound_max_helpfulness_filt <= upper_bound_min_helpfulness_filt
+
+# Ploting
+helpfulness_spec_plot <- data_prepared_helpfulness |> 
+  dplyr::select(- success_rate) |> 
   arrange(helpfulness) |>
   mutate(rank = row_number()) |> 
   # Plot call
   specification_curve_plot_with_shading(
   outcome = helpfulness,
   outcome_name = "Mean helpfulness",
-  plot_title = "Mean helpfulness score by configuration",
   interval_lower = "boot_helpfulness_lower",
   interval_upper = "boot_helpfulness_upper",
   rank_by = rank,
@@ -695,6 +718,8 @@ ggsave(
 )
 ```
 
+The estimated mean quality ranged from `r round(min_config_helpfulness, 2)` to `r round(max_config_helpfulness, 2)`. While the confidence intervals `r if(cis_all_overlap) "fully overlapped" else "did not universally overlap"` across the entire design space, they `r if(cis_all_overlap_filtered) "fully overlapped" else "did not universally overlap anymore"` once uninterpretable configurations (a success rate below 25%) were excluded.
+
 ### Specification curve: Actionability
 
 ```{r}
@@ -702,7 +727,7 @@ ggsave(
 #| warning: false
 #| message: false
 
-actionability_spec_plot <- data_plot |>  
+data_prepared_actionability <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
@@ -716,26 +741,37 @@ actionability_spec_plot <- data_plot |>
   # Summarize
   group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
-    actionability = mean(mean_actionability_label),
-    boot_actionability_lower = mean(boot_actionability_label_lower),
-    boot_actionability_upper = mean(boot_actionability_label_upper),
+    actionability = mean(mean_actionability_label, na.rm = TRUE),
+    boot_actionability_lower = mean(boot_actionability_label_lower, na.rm = TRUE),
+    boot_actionability_upper = mean(boot_actionability_label_upper, na.rm = TRUE),
     .groups = "drop"
-  ) |> 
+  )
+
+# Minimum and maximum data points
+min_config_actionability <- min(data_prepared_actionability$actionability, na.rm = TRUE)
+max_config_actionability <- max(data_prepared_actionability$actionability, na.rm = TRUE)
+
+# Inference: Overlap of confidence intervals
+lower_bound_max_actionability <- max(data_prepared_actionability$boot_actionability_lower, na.rm = TRUE)
+upper_bound_min_actionability <- min(data_prepared_actionability$boot_actionability_upper, na.rm = TRUE)
+cis_all_overlap_actionability <- lower_bound_max_actionability <= upper_bound_min_actionability
+
+# Plotting
+actionability_spec_plot <- data_prepared_actionability |> 
   arrange(actionability) |>
   mutate(rank = row_number()) |> 
   # Plot call
   specification_curve_plot_with_shading(
-  outcome = actionability,
-  outcome_name = "Mean actionability",
-  plot_title = "Mean actionability score by configuration",
-  interval_lower = "boot_actionability_lower",
-  interval_upper = "boot_actionability_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 5)))
-  }
-)
+    outcome = actionability,
+    outcome_name = "Mean actionability",
+    interval_lower = "boot_actionability_lower",
+    interval_upper = "boot_actionability_upper",
+    rank_by = rank,
+    
+    mutate_plots = \(top, bottom, df) {
+      list(top + coord_cartesian(ylim = c(0, 5)))
+    }
+  )
 
 actionability_spec_plot
 
@@ -748,6 +784,8 @@ ggsave(
 )
 ```
 
+The estimated mean actionability of LLM-authored reviews ranged from `r round(min_config_actionability, 2)` to `r round(max_config_actionability, 2)`, with confidence intervals that `r if(cis_all_overlap_actionability) "fully overlap across all configurations" else "do not universally overlap"`.
+
 ### Specification curve: Grounding & Specificity
 
 ```{r}
@@ -755,7 +793,7 @@ ggsave(
 #| warning: false
 #| message: false
 
-specificity_spec_plot <- data_plot |>  
+data_prepared_specificity <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
@@ -769,26 +807,37 @@ specificity_spec_plot <- data_plot |>
   # Summarize
   group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
-    specificity = mean(mean_grounding_specificity_label),
-    boot_specificity_lower = mean(boot_grounding_specificity_label_lower),
-    boot_specificity_upper = mean(boot_grounding_specificity_label_upper),
+    specificity = mean(mean_grounding_specificity_label, na.rm = TRUE),
+    boot_specificity_lower = mean(boot_grounding_specificity_label_lower, na.rm = TRUE),
+    boot_specificity_upper = mean(boot_grounding_specificity_label_upper, na.rm = TRUE),
     .groups = "drop"
-  ) |> 
+  )
+
+# Minimum and maximum data points
+min_config_specificity <- min(data_prepared_specificity$specificity, na.rm = TRUE)
+max_config_specificity <- max(data_prepared_specificity$specificity, na.rm = TRUE)
+
+# Inference: Overlap of confidence intervals
+lower_bound_max_specificity <- max(data_prepared_specificity$boot_specificity_lower, na.rm = TRUE)
+upper_bound_min_specificity <- min(data_prepared_specificity$boot_specificity_upper, na.rm = TRUE)
+cis_all_overlap_specificity <- lower_bound_max_specificity <= upper_bound_min_specificity
+
+# Plotting
+specificity_spec_plot <- data_prepared_specificity |> 
   arrange(specificity) |>
   mutate(rank = row_number()) |> 
   # Plot call
   specification_curve_plot_with_shading(
-  outcome = specificity,
-  outcome_name = "Mean grounding & specificity",
-  plot_title = "Mean grounding & specificity score by configuration",
-  interval_lower = "boot_specificity_lower",
-  interval_upper = "boot_specificity_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 5)))
-  }
-)
+    outcome = specificity,
+    outcome_name = "Mean grounding & specificity",
+    interval_lower = "boot_specificity_lower",
+    interval_upper = "boot_specificity_upper",
+    rank_by = rank,
+    
+    mutate_plots = \(top, bottom, df) {
+      list(top + coord_cartesian(ylim = c(0, 5)))
+    }
+  )
 
 specificity_spec_plot
 
@@ -801,6 +850,8 @@ ggsave(
 )
 ```
 
+The estimated mean grounding and specificity of LLM-authored reviews ranged from `r round(min_config_specificity, 2)` to `r round(max_config_specificity, 2)`, with confidence intervals that `r if(cis_all_overlap_specificity) "fully overlap across all configurations" else "do not universally overlap"`.
+
 ### Specification curve: Verifiability
 
 ```{r}
@@ -808,7 +859,7 @@ ggsave(
 #| warning: false
 #| message: false
 
-verifiability_spec_plot <- data_plot |>  
+data_prepared_verifiability <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
@@ -822,26 +873,37 @@ verifiability_spec_plot <- data_plot |>
   # Summarize
   group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
-    verifiability = mean(mean_verifiability_label),
-    boot_verifiability_lower = mean(boot_verifiability_label_lower),
-    boot_verifiability_upper = mean(boot_verifiability_label_upper),
+    verifiability = mean(mean_verifiability_label, na.rm = TRUE),
+    boot_verifiability_lower = mean(boot_verifiability_label_lower, na.rm = TRUE),
+    boot_verifiability_upper = mean(boot_verifiability_label_upper, na.rm = TRUE),
     .groups = "drop"
-  ) |> 
+  )
+
+# Minimum and maximum data points
+min_config_verifiability <- min(data_prepared_verifiability$verifiability, na.rm = TRUE)
+max_config_verifiability <- max(data_prepared_verifiability$verifiability, na.rm = TRUE)
+
+# Inference: Overlap of confidence intervals
+lower_bound_max_verifiability <- max(data_prepared_verifiability$boot_verifiability_lower, na.rm = TRUE)
+upper_bound_min_verifiability <- min(data_prepared_verifiability$boot_verifiability_upper, na.rm = TRUE)
+cis_all_overlap_verifiability <- lower_bound_max_verifiability <= upper_bound_min_verifiability
+
+# Plotting
+verifiability_spec_plot <- data_prepared_verifiability |> 
   arrange(verifiability) |>
   mutate(rank = row_number()) |> 
   # Plot call
   specification_curve_plot_with_shading(
-  outcome = verifiability,
-  outcome_name = "Mean verifiability",
-  plot_title = "Mean verifiability score by configuration",
-  interval_lower = "boot_verifiability_lower",
-  interval_upper = "boot_verifiability_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 5)))
-  }
-)
+    outcome = verifiability,
+    outcome_name = "Mean verifiability",
+    interval_lower = "boot_verifiability_lower",
+    interval_upper = "boot_verifiability_upper",
+    rank_by = rank,
+    
+    mutate_plots = \(top, bottom, df) {
+      list(top + coord_cartesian(ylim = c(0, 5)))
+    }
+  )
 
 verifiability_spec_plot
 
@@ -854,14 +916,18 @@ ggsave(
 )
 ```
 
+The estimated mean verifiability of LLM-authored reviews ranged from `r round(min_config_verifiability, 2)` to `r round(max_config_verifiability, 2)`, with confidence intervals that `r if(cis_all_overlap_verifiability) "fully overlap across all configurations" else "do not universally overlap"`.
+
 ## Success metric
 
-### Specification curve: Succcess rate
+### Specification curve: Success rate
 
 ```{r}
 #| label: spec curve success rate quality
+#| warning: false
+#| message: false
 
-success_spec_plot <- data_plot |>  
+data_prepared_success <- data_plot |>  
   # Preprocess
   dplyr::select(
     `Model`, 
@@ -875,26 +941,37 @@ success_spec_plot <- data_plot |>
   # Summarize
   group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
   summarise(
-    success_rate = mean(mean_success),
-    boot_success_lower = mean(boot_success_rate_lower),
-    boot_success_upper = mean(boot_success_rate_upper),
+    success_rate = mean(mean_success, na.rm = TRUE),
+    boot_success_lower = mean(boot_success_rate_lower, na.rm = TRUE),
+    boot_success_upper = mean(boot_success_rate_upper, na.rm = TRUE),
     .groups = "drop"
-  ) |> 
+  )
+
+# Minimum and maximum data points
+min_config_success <- min(data_prepared_success$success_rate, na.rm = TRUE)
+max_config_success <- max(data_prepared_success$success_rate, na.rm = TRUE)
+
+# Inference: Overlap of confidence intervals (With safety na.rm = TRUE)
+lower_bound_max_success <- max(data_prepared_success$boot_success_lower, na.rm = TRUE)
+upper_bound_min_success <- min(data_prepared_success$boot_success_upper, na.rm = TRUE)
+cis_all_overlap_success <- lower_bound_max_success <= upper_bound_min_success
+
+# Plotting
+success_spec_plot <- data_prepared_success |> 
   arrange(success_rate) |>
   mutate(rank = row_number()) |> 
   # Plot call
   specification_curve_plot_with_shading(
-  outcome = success_rate,
-  outcome_name = "Mean success rate",
-  plot_title = "Mean success rate by configuration",
-  interval_lower = "boot_success_lower",
-  interval_upper = "boot_success_upper",
-  rank_by = rank,
-  
-  mutate_plots = \(top, bottom, df) {
-    list(top + coord_cartesian(ylim = c(0, 1)))
-  }
-)
+    outcome = success_rate,
+    outcome_name = "Mean success rate",
+    interval_lower = "boot_success_lower",
+    interval_upper = "boot_success_upper",
+    rank_by = rank,
+    
+    mutate_plots = \(top, bottom, df) {
+      list(top + coord_cartesian(ylim = c(0, 1)))
+    }
+  )
 
 success_spec_plot
 
@@ -906,6 +983,200 @@ ggsave(
   dpi = PLOT_DPI
 )
 ```
+
+The estimated operational success rate of the configurations ranged from `r round(min_config_success * 100, 1)`% to `r round(max_config_success * 100, 1)`%, with confidence intervals that `r if(cis_all_overlap_success) "fully overlap across all configurations" else "do not universally overlap"`.
+
+# Exploratory
+
+## Data transformation and calculation
+
+```{r}
+#| label: score summary exploratory
+
+# Create summary
+review_data_summary_expl <- review_data_calculated |>
+  group_by(across(all_of(CONFIG_COL))) |>
+  summarise(
+    
+    # Exploratory: SDs of quality metrics
+    across(all_of(SCORE_COL), ~sd(.x, na.rm = TRUE), .names = "sd_{.col}"),
+    
+    .groups = "drop"
+  )
+```
+
+## Bootstrap
+
+```{r}
+#| label: bootstrap function exploratory
+
+# Set alpha level
+global_alpha <- (1 - CONFIDENCE_LVL) / 2
+
+# Define bootstrap function
+#' Bootstrap Confidence Interval Generation
+#'
+#' Performs non-parametric bootstrapping to estimate uncertainty for given metrics
+#'
+#' @param df A data frame containing the review-level data.
+#' @param group_col A character string specifying the column to group by 
+#' @param iterations Integer. The number of bootstrap resamples to perform. 
+#'   Defaults to the global \code{NUM_ITERATIONS}.
+#'
+#' @return A data frame containing the lower and upper confidence bounds. 
+#'   Columns are named using the pattern: 
+#'   \code{boot_[original_metric]_[lower/upper]}
+bootstrap_sd <- function(df, group_col, iterations = NUM_ITERATIONS) {
+  
+  set.seed(42)
+  
+  # Generate the distribution
+  boot_distribution <- map_df(1:iterations, function(i) {
+    df |> 
+      # Group by configuration
+      group_by(.data[[group_col]]) |> 
+      # Sample with replacement
+      slice_sample(prop = 1, replace = TRUE) |> 
+      summarise(
+        
+        # Exploratory: SDs of quality metrics
+        across(all_of(SCORE_COL), 
+               ~sd(.x, na.rm = TRUE),
+               .names = "boot_{.col}"),
+        
+        .groups = "drop"
+      )
+  })
+  
+  # Calculate CIs
+  ci_results <- boot_distribution |> 
+    # Group by configuration
+    group_by(.data[[group_col]]) |> 
+    summarise(
+      across(starts_with("boot_"), 
+             list(lower = ~quantile(.x, global_alpha, na.rm = TRUE),
+                  upper = ~quantile(.x, 1 - global_alpha, na.rm = TRUE)),
+             .names = "{.col}_{.fn}"),
+      .groups = "drop"
+    )
+  
+  return(ci_results)
+}
+```
+
+```{r}
+#| label: bootstrap exploratory
+
+boot_results_expl <- bootstrap_sd(review_data_calculated, "config_group")
+```
+
+```{r}
+#| label: data join exploratory
+
+review_data_bootstraped_expl <- review_data_summary_expl |> 
+  left_join(boot_results_expl, "config_group")
+```
+
+## Data preparation
+
+```{r}
+#| label: plot data prep exploratory
+#| warning: false
+#| message: false
+
+data_plot_expl <- review_data_bootstraped_expl |> 
+  mutate(
+    model = fct_relevel(
+      as.factor(model),
+      "Gemini-3 Flash", "Llama 3.3 (70B)", "GPT-3.5 Turbo", "o3 Mini", 
+      "o4 Mini", "GPT-4o Mini", "GPT-4o", "GPT-5 Nano", "GPT-5 Mini"
+    ),
+    hyperparameter = fct_relevel(
+      as.factor(hyperparameter),
+      "Tempr 1.5", "Tempr 1", "Tempr 0.5", "Tempr 0", "Re high", "Re low"
+    ),
+    chain_of_thought = fct_relevel(
+      as.factor(chain_of_thought),
+      "True", "False"
+    ),
+    note_taking = fct_relevel(
+      as.factor(note_taking),
+      "Faithful", "Turned off"
+    )
+  ) |> 
+  rename(
+    `Model` = model,
+    `Hyper-<br> parameter` = hyperparameter,
+    `CoT<br> used` = chain_of_thought,
+    `Notes` = note_taking
+  )
+```
+
+## Specification curve: Helpfulness
+
+```{r}
+#| label: spec curve helpfulness exploratory
+#| warning: false
+#| message: false
+
+data_prepared_helpfulness_expl <- data_plot_expl |>  
+  # Preprocess
+  dplyr::select(
+    `Model`, 
+    `Hyper-<br> parameter`, 
+    `CoT<br> used`, 
+    `Notes`,
+    sd_helpfulness_label,
+    boot_helpfulness_label_lower,      
+    boot_helpfulness_label_upper
+  ) |> 
+  # Summarize
+  group_by(Model, `Hyper-<br> parameter`, `CoT<br> used`, Notes) |>
+  summarise(
+    helpfulness_sd = mean(sd_helpfulness_label, na.rm = TRUE),
+    boot_helpfulness_lower = mean(boot_helpfulness_label_lower, na.rm = TRUE),
+    boot_helpfulness_upper = mean(boot_helpfulness_label_upper, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Minimum and maximum data points
+min_config_sd_helpfulness <- min(data_prepared_helpfulness_expl$helpfulness_sd, na.rm = TRUE)
+max_config_sd_helpfulness <- max(data_prepared_helpfulness_expl$helpfulness_sd, na.rm = TRUE)
+
+# Inference: Overlap of confidence intervals
+lower_bound_max_helpfulness_expl <- max(data_prepared_helpfulness_expl$boot_helpfulness_lower, na.rm = TRUE)
+upper_bound_min_helpfulness_expl <- min(data_prepared_helpfulness_expl$boot_helpfulness_upper, na.rm = TRUE)
+cis_all_overlap_helpfulness_expl <- lower_bound_max_helpfulness_expl <= upper_bound_min_helpfulness_expl
+
+# Plotting
+helpfulness_spec_plot_expl <- data_prepared_helpfulness_expl |> 
+  arrange(helpfulness_sd) |>
+  mutate(rank = row_number()) |> 
+  # Plot call
+  specification_curve_plot_with_shading(
+    outcome = helpfulness_sd,
+    outcome_name = "Standard deviation helpfulness",
+    interval_lower = "boot_helpfulness_lower",
+    interval_upper = "boot_helpfulness_upper",
+    rank_by = rank,
+    
+    mutate_plots = \(top, bottom, df) {
+      list(top + coord_cartesian(ylim = c(0, 4)))
+    }
+  )
+
+helpfulness_spec_plot_expl
+
+ggsave(
+  filename = "output/plots/helpfulness_spec_plot_expl.png", 
+  plot = helpfulness_spec_plot_expl, 
+  width = PLOT_WIDTH, 
+  height = PLOT_HEIGHT, 
+  dpi = PLOT_DPI
+)
+```
+
+The estimated between-paper standard deviation of the helpfulness metric ranged from `r round(min_config_sd_helpfulness, 2)` to `r round(max_config_sd_helpfulness, 2)`, with confidence intervals that `r if(cis_all_overlap_helpfulness_expl) "fully overlap across all configurations" else "do not universally overlap"`.
 
 # Session info
 
