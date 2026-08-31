@@ -6,3 +6,5 @@
 
 # Potentially temporary rendered output folder
 analyses/.quarto/
+/.quarto/
+**/*.quarto_ipynb
