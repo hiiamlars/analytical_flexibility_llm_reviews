@@ -1161,7 +1161,7 @@ helpfulness_spec_plot_expl <- data_prepared_helpfulness_expl |>
     rank_by = rank,
     
     mutate_plots = \(top, bottom, df) {
-      list(top + coord_cartesian(ylim = c(0, 4)))
+      list(top + coord_cartesian(ylim = c(0, 2)))
     }
   )
 
