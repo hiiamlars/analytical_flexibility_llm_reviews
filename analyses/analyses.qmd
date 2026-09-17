@@ -261,7 +261,7 @@ review_data_bootstraped <- review_data_summary |>
 
 ## Specification curve function
 
-The plot function for a specification curve was taken from [@cumminsThreatAnalyticFlexibility2025]:
+The plot function for a specification curve was taken from [@cumminsThreatAnalyticFlexibility2026]:
 
 ```{r}
 #| label: spec curve function
